@@ -49,7 +49,28 @@ class FitToolbar(NavigationToolbar2Tk):
 
     def home(self, *args):
         self._on_home()
-from .widgets import card, section_title, Chip, ScrollFrame, Segmented, FeatureList
+from .widgets import card, section_title, Chip, ScrollFrame, Segmented, FeatureList, Paned
+
+
+class SmoothCanvas(FigureCanvasTkAgg):
+    """拉動視窗、分隔線時，等停下來 0.15 秒才重畫圖（不會每移動一點就整張重畫而卡頓）。"""
+    _resize_job = None
+
+    def resize(self, event):
+        w = self.get_tk_widget()
+        if self._resize_job is not None:
+            try:
+                w.after_cancel(self._resize_job)
+            except Exception:
+                pass
+        self._resize_job = w.after(150, lambda e=event: self._do_resize(e))
+
+    def _do_resize(self, event):
+        self._resize_job = None
+        try:
+            FigureCanvasTkAgg.resize(self, event)
+        except Exception:
+            pass
 
 LEGENDS = ["溫度 (run)", "溫度", "run", "實驗描述"]
 CMAP_CHOICES = ["自動", "turbo", "viridis", "plasma", "coolwarm", "tab10", "tab20", "jet"]
@@ -147,6 +168,7 @@ class App:
                      filter=self.filter_var.get(), db_paths=dict(self._db_paths),
                      update_info=self._update_info, prompted=self._prompted_version,
                      history=(self._history, self._redo))
+        self._save_sash()
         self._dead = True
         self._gen += 1
         for w in self.root.winfo_children():
@@ -187,17 +209,16 @@ class App:
         self._build_header()
         body = tk.Frame(self.root, bg=T.BG)
         body.pack(fill="both", expand=True, padx=10, pady=(10, 6))
-        pw = ttk.Panedwindow(body, orient="horizontal")
+        pw = Paned(body, orient="horizontal")
         pw.pack(fill="both", expand=True)
+        self._main_paned = pw
 
         left_o, left = card(pw, pad=10)
         mid_o, mid = card(pw, pad=10)
         right_o, right = card(pw, pad=10)
-        left_o.configure(width=300)
-        mid_o.configure(width=470)
-        pw.add(left_o, weight=0)
-        pw.add(mid_o, weight=0)
-        pw.add(right_o, weight=1)
+        pw.add_pane(left_o, stretch=False, size=300, minsize=200)
+        pw.add_pane(mid_o, stretch=False, size=470, minsize=300)
+        pw.add_pane(right_o, stretch=True, minsize=400)
         self._build_left(left)
         self._build_middle(mid)
         self._build_right(right)
@@ -273,12 +294,14 @@ class App:
         self._feature_scroll = sf
 
     def _build_middle(self, parent):
-        vp = ttk.Panedwindow(parent, orient="vertical")
+        vp = Paned(parent, orient="vertical")
+        vp.configure(bg=T.CARD)
         vp.pack(fill="both", expand=True)
+        self._mid_paned = vp
         data = tk.Frame(vp, bg=T.CARD)
         prm = tk.Frame(vp, bg=T.CARD)
-        vp.add(data, weight=3)
-        vp.add(prm, weight=2)
+        vp.add_pane(data, stretch=True, minsize=150)
+        vp.add_pane(prm, stretch=True, minsize=150)
 
         # ---- 資料 ----
         row, _ = section_title(data, "資料", "☰", T.MUTED)
@@ -383,12 +406,13 @@ class App:
         self.n_chip.pack(side="right")
 
         self._build_style_bar(parent)
-        vp = ttk.Panedwindow(parent, orient="vertical")
+        vp = Paned(parent, orient="vertical")
+        vp.configure(bg=T.CARD)
         vp.pack(fill="both", expand=True, pady=(4, 0))
         figf = tk.Frame(vp, bg=T.CARD)
         txtf = tk.Frame(vp, bg=T.CARD)
-        vp.add(figf, weight=5)
-        vp.add(txtf, weight=1)
+        vp.add_pane(figf, stretch=True, minsize=200)
+        vp.add_pane(txtf, stretch=False, minsize=60)
         self._right_paned = vp
         self.root.after(400, self._init_sash)
         self.fig = Figure(figsize=(4, 3), layout="constrained")
@@ -401,11 +425,11 @@ class App:
         self.plot_host.grid(row=0, column=0, sticky="nsew")
         host.rowconfigure(0, weight=1)
         host.columnconfigure(0, weight=1)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_host)
+        self.canvas = SmoothCanvas(self.fig, master=self.plot_host)
         self.canvas.get_tk_widget().configure(width=320, height=240)
         self._plot_win = self.plot_host.create_window(0, 0, window=self.canvas.get_tk_widget(), anchor="nw")
         self._plot_need = (0, 0)
-        self.plot_host.bind("<Configure>", lambda e: self._layout_plot())
+        self.plot_host.bind("<Configure>", lambda e: self._schedule_layout())
         w = self.canvas.get_tk_widget()
         w.bind("<MouseWheel>", self._plot_wheel, add="+")
         w.bind("<Shift-MouseWheel>", lambda e: self._plot_wheel(e, horizontal=True), add="+")
@@ -441,10 +465,32 @@ class App:
         self.text.tag_configure("err", foreground=T.ERROR)
 
     def _init_sash(self):
+        """分隔線位置：用上次關閉時的位置，沒有就用預設比例。"""
+        saved = self.gui_settings.get("panes") or {}
         try:
-            h = self._right_paned.winfo_height()
-            if h > 200:
-                self._right_paned.sashpos(0, int(h * 0.80))
+            if saved.get("main"):
+                for i, pos in enumerate(saved["main"]):
+                    self._main_paned.set_sash(i, pos)
+            h = int(self._mid_paned.winfo_height() or 0)
+            if saved.get("mid"):
+                self._mid_paned.set_sash(0, saved["mid"])
+            elif h > 200:
+                self._mid_paned.set_sash(0, int(h * 0.58))
+            h = int(self._right_paned.winfo_height() or 0)
+            if saved.get("right"):
+                self._right_paned.set_sash(0, saved["right"])
+            elif h > 200:
+                self._right_paned.set_sash(0, int(h * 0.80))
+        except Exception:
+            pass
+
+    def _save_sash(self):
+        try:
+            panes = {"main": [self._main_paned.get_sash(i) for i in range(2)],
+                     "mid": self._mid_paned.get_sash(0), "right": self._right_paned.get_sash(0)}
+            if all(v is not None for v in panes["main"]) and panes["mid"] and panes["right"]:
+                self.gui_settings["panes"] = panes
+                ST.save_settings(self.gui_settings)
         except Exception:
             pass
 
@@ -755,7 +801,18 @@ class App:
         ph = int(self.plot_style.get("panel_h", 380))
         return (cols * pw if cols > 1 else 0, rows * ph if rows > 1 else 0)
 
+    def _schedule_layout(self):
+        """拉動視窗時合併成一次排版（等停下來 0.08 秒）。"""
+        job = getattr(self, "_layout_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self._layout_job = self.root.after(80, self._layout_plot)
+
     def _layout_plot(self):
+        self._layout_job = None
         try:
             aw, ah = int(self.plot_host.winfo_width() or 0), int(self.plot_host.winfo_height() or 0)
         except (tk.TclError, TypeError, ValueError):
@@ -1928,6 +1985,7 @@ class App:
                       command=lambda: self.spawn_console("new", self.db.path) if self.db else None,
                       state="normal" if self.db else "disabled")
         m.add_command(label="開啟 jobs 資料夾", command=lambda: self._open_path(os.path.join(TOOL_ROOT, "jobs")))
+        m.add_command(label="從舊的工具資料夾匯入 jobs 設定檔…", command=self.import_jobs)
         m.add_separator()
         m.add_command(label="文字選單（tools.bat）", command=lambda: self.spawn_console("menu"))
         m.add_command(label="環境檢查（diag）", command=lambda: self.spawn_console("diag", pause=True))
@@ -1938,6 +1996,35 @@ class App:
                 m.grab_release()
             except Exception:
                 pass
+
+    def import_jobs(self, folder=None):
+        """把另一個（舊的）工具資料夾裡自己寫的批次設定檔複製過來；同名的不覆蓋。"""
+        import shutil
+        if folder is None:
+            folder = filedialog.askdirectory(title="選擇舊的工具資料夾（裡面有 jobs 資料夾的那個）",
+                                             initialdir=os.path.dirname(TOOL_ROOT))
+        if not folder:
+            return 0
+        src = os.path.join(folder, "jobs") if os.path.isdir(os.path.join(folder, "jobs")) else folder
+        dst = os.path.join(TOOL_ROOT, "jobs")
+        if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(dst)):
+            messagebox.showinfo("匯入 jobs", "選到的就是目前的工具資料夾，不用匯入。", parent=self.root)
+            return 0
+        copied, skipped = [], []
+        for name in sorted(os.listdir(src)):
+            if not name.lower().endswith(".toml") or name.startswith("_"):
+                continue
+            target = os.path.join(dst, name)
+            if os.path.exists(target):
+                skipped.append(name)
+                continue
+            shutil.copy2(os.path.join(src, name), target)
+            copied.append(name)
+        msg = (f"已匯入 {len(copied)} 個：{', '.join(copied)}" if copied else "沒有新的設定檔可以匯入") + \
+            (f"\n已經存在、沒有覆蓋：{', '.join(skipped)}" if skipped else "")
+        messagebox.showinfo("匯入 jobs", msg, parent=self.root)
+        self.status(msg.splitlines()[0], "ok" if copied else "info")
+        return len(copied)
 
     def _tool_run_job(self):
         path = filedialog.askopenfilename(title="選擇批次分析設定檔", initialdir=os.path.join(TOOL_ROOT, "jobs"),
@@ -2466,7 +2553,7 @@ class App:
         win.geometry("1000x700")
         win.configure(bg=T.CARD)
         fig = Figure(figsize=(4, 3), layout="constrained")
-        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas = SmoothCanvas(fig, master=win)
         canvas.get_tk_widget().configure(width=320, height=240)
         state = {}
         tb = FitToolbar(canvas, win, lambda: self._fit_view(fig, canvas, tb, state.get("lim", {})),
@@ -2487,6 +2574,7 @@ class App:
             canvas.draw()
 
     def _close(self):
+        self._save_sash()
         self._gen += 1
         self.root.quit()
         self.root.destroy()

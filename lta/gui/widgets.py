@@ -204,3 +204,35 @@ class FeatureList(tk.Frame):
             if n != self.selected:
                 c["title"].configure(fg=T.TEXT if ok else T.FAINT)
             c["desc"].configure(fg=T.MUTED if ok else T.BORDER)
+
+
+class Paned(tk.PanedWindow):
+    """可拖曳的分隔區塊。拖曳時只顯示一條線，放開才重新排版 → 不會卡頓（ttk.Panedwindow 會一直重畫）。"""
+
+    def __init__(self, parent, orient="horizontal"):
+        super().__init__(parent, orient=orient, opaqueresize=False, sashwidth=8, sashrelief="flat",
+                         bg=T.BG, bd=0, showhandle=False, sashpad=0)
+        self._horizontal = orient == "horizontal"
+
+    def add_pane(self, child, stretch=True, size=None, minsize=120):
+        kw = {"stretch": "always" if stretch else "never", "minsize": minsize}
+        if size:
+            kw["width" if self._horizontal else "height"] = size
+        self.add(child, **kw)
+
+    def get_sash(self, i):
+        try:
+            x, y = self.sash_coord(i)
+            return int(x if self._horizontal else y)
+        except (tk.TclError, TypeError, ValueError):
+            return None
+
+    def set_sash(self, i, pos):
+        try:
+            x, y = self.sash_coord(i)
+            if self._horizontal:
+                self.sash_place(i, int(pos), y)
+            else:
+                self.sash_place(i, x, int(pos))
+        except (tk.TclError, TypeError, ValueError):
+            pass

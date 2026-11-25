@@ -423,9 +423,13 @@ class SettingsDialog:
                    command=lambda: self.app.check_update(manual=True)).pack(side="left")
         ttk.Button(row, text="還原上一版", style="Ghost.TButton", command=self._rollback).pack(side="left", padx=6)
         if updater.is_dev_folder():
-            tk.Label(f, text="這是開發用資料夾（git），不會自動更新；發佈新版請用：\n"
-                     "python -m lta release 2.4.0 -n \"更新說明\" --push", bg=T.CARD, fg=T.WARNING,
-                     justify="left").pack(anchor="w", pady=(6, 0))
+            prow = tk.Frame(f, bg=T.CARD)
+            prow.pack(fill="x", pady=(6, 0))
+            ttk.Button(prow, text="⬆ 發佈到 GitHub", style="Accent.TButton",
+                       command=lambda: self.app.spawn_console("publish", pause=True)).pack(side="left")
+            tk.Label(prow, text="這是你的開發資料夾（GitHub Desktop 複製的），不會被自動更新。\n"
+                     "按這裡（或雙擊 publish.bat）就會上傳目前版本，同事會收到更新提示。", bg=T.CARD,
+                     fg=T.MUTED, justify="left", font=T.font(9)).pack(side="left", padx=10)
         self._h(f, "這一版的更新內容", None)
         for n in rel.get("notes", []):
             tk.Label(f, text="‧ " + n, bg=T.CARD, fg=T.TEXT, anchor="w", justify="left",

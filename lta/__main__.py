@@ -228,6 +228,18 @@ def cmd_release(a, settings):
     updater.release(version=a.version, notes=a.notes, repo=a.repo, branch=a.branch, push=a.push)
 
 
+def cmd_publish(a, settings):
+    from . import updater
+    print("=== 發佈到 GitHub ===\n")
+    try:
+        ok = updater.publish()
+    except Exception as e:
+        print(f"\n發佈失敗：{e}")
+        ok = False
+    if not ok:
+        sys.exit(1)
+
+
 def cmd_types(a, settings):
     from .batch.jobs import load_all
     for name, func in sorted(load_all().items()):
@@ -419,6 +431,7 @@ def main(argv=None):
     s = sub.add_parser("release", help="發佈新版本（開發者用）")
     s.add_argument("version", nargs="?"); s.add_argument("-n", "--notes", nargs="*", default=None)
     s.add_argument("--repo"); s.add_argument("--branch"); s.add_argument("--push", action="store_true")
+    sub.add_parser("publish", help="一鍵發佈到 GitHub（開發者用）")
     sub.add_parser("install")
     sub.add_parser("uninstall")
     sub.add_parser("shortcut")
@@ -430,7 +443,7 @@ def main(argv=None):
         p.print_help()
         return
     settings = load_settings()
-    if a.cmd not in ("release",):
+    if a.cmd not in ("release", "publish"):
         try:
             import numpy  # noqa: F401   這個 Python 能用才記下來
             from .gui.launcher import register_paths
@@ -441,7 +454,7 @@ def main(argv=None):
      "run-all": cmd_run_all, "new": cmd_new, "types": cmd_types,
      "menu": cmd_menu, "open": cmd_open, "gui": cmd_gui, "app": cmd_gui, "shortcut": cmd_install,
      "install": cmd_install, "uninstall": cmd_uninstall, "diag": cmd_diag,
-     "update": cmd_update, "release": cmd_release}[a.cmd](a, settings)
+     "update": cmd_update, "release": cmd_release, "publish": cmd_publish}[a.cmd](a, settings)
 
 
 if __name__ == "__main__":

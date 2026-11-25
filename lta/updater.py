@@ -258,7 +258,7 @@ def release(version=None, notes=None, repo=None, branch=None, push=False, log=pr
 
     def git(*args):
         log("$ git " + " ".join(args))
-        out = subprocess.run(["git", *args], cwd=TOOL_ROOT, capture_output=True, text=True)
+        out = subprocess.run([find_git() or "git", *args], cwd=TOOL_ROOT, capture_output=True, text=True)
         if out.stdout.strip():
             log(out.stdout.strip())
         if out.returncode != 0:
@@ -273,3 +273,120 @@ def release(version=None, notes=None, repo=None, branch=None, push=False, log=pr
     git("push", "origin", rel.get("branch", "main"))
     log(f"\n已發佈 v{rel.get('version')}。其他人下次開啟軟體就會收到更新通知。")
     return rel
+
+
+# ---------------------------------------------------------------------------
+# 一鍵發佈（publish.bat / 設定 → 更新 → 發佈到 GitHub）
+# ---------------------------------------------------------------------------
+def find_git():
+    """找 git：PATH → Git for Windows → GitHub Desktop 內建的 git。"""
+    import glob
+    import shutil
+    path = shutil.which("git")
+    if path:
+        return path
+    cands = []
+    for env in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(env)
+        if base:
+            cands.append(os.path.join(base, "Git", "cmd", "git.exe"))
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local:
+        cands.append(os.path.join(local, "Programs", "Git", "cmd", "git.exe"))
+        cands += sorted(glob.glob(os.path.join(local, "GitHubDesktop", "app-*", "resources", "app", "git",
+                                               "cmd", "git.exe")), reverse=True)
+    return next((c for c in cands if os.path.isfile(c)), None)
+
+
+def bump_patch(version):
+    parts = list(parse_version(version)) + [0, 0, 0]
+    major, minor, patch = parts[:3]
+    return f"{major}.{minor}.{patch + 1}"
+
+
+PERSONAL_FILES = ("settings.toml", "catalog.csv", "catalog.xlsx", ".catalog_cache.json")
+
+
+def publish(log=print, ask=input, root=None):
+    """把工具資料夾發佈到 GitHub：不用開 GitHub Desktop、不用打版本號。
+
+    · 版本號用 release.json 的（我給你的更新檔已經改好）
+    · 你自己改了程式、版本號沒變 → 自動 +0.0.1，並問一句更新說明（直接 Enter 也可以）
+    · 不小心被追蹤的個人檔案（settings.toml、資料總表）會停止上傳，但留在你的電腦上
+    推送失敗時（例如還沒登入）：變更已經存好，打開 GitHub Desktop 按「Push origin」即可。"""
+    root = root or TOOL_ROOT
+    if not os.path.isdir(os.path.join(root, ".git")):
+        log("這個資料夾不是用 GitHub Desktop 複製（Clone）下來的，沒辦法直接發佈。")
+        log("請照「發佈與更新.md」第 1 步，用 GitHub Desktop Clone 一份，以後都在那個資料夾裡操作。")
+        return False
+    git = find_git()
+    if not git:
+        log("找不到 git。請安裝 GitHub Desktop（https://desktop.github.com）或 Git for Windows（https://git-scm.com）。")
+        return False
+
+    def run(*args, check=True, quiet=False, extra=()):
+        out = subprocess.run([git, *extra, *args], cwd=root, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace")
+        if not quiet and out.stdout.strip():
+            log(out.stdout.strip())
+        if check and out.returncode != 0:
+            raise RuntimeError((out.stderr or out.stdout).strip() or f"git {args[0]} 失敗")
+        return out
+
+    rel = read_release(os.path.join(root, "release.json"))
+    branch = rel.get("branch", "main")
+    log(f"工具資料夾：{root}")
+    log(f"使用的 git：{git}")
+    run("fetch", "origin", branch, check=False, quiet=True)
+    changes = [l for l in run("status", "--porcelain", quiet=True).stdout.splitlines() if l.strip()]
+    remote = None
+    try:
+        remote = check(timeout=8).get("latest")
+    except Exception as e:
+        log(f"（讀不到 GitHub 上的版本：{e}，照本機 release.json 發佈）")
+    local = rel.get("version", "0")
+    log(f"本機版本 v{local}　GitHub 上 v{remote or '?'}　有變更的檔案：{len(changes)} 個")
+
+    if remote and parse_version(local) <= parse_version(remote):
+        if not changes:
+            ahead = run("rev-list", "--count", f"origin/{branch}..HEAD", check=False, quiet=True).stdout.strip()
+            if ahead and ahead != "0":
+                log("有已經存好但還沒上傳的版本，直接上傳。")
+            else:
+                log(f"\nGitHub 上已經是 v{remote}，而且沒有新的變更，不需要發佈。")
+                return True
+        else:
+            new = bump_patch(remote)
+            note = (ask(f"\n版本號會改成 v{new}。這一版改了什麼？（直接 Enter = 小幅修正）：") or "").strip()
+            rel["version"] = new
+            rel["date"] = time.strftime("%Y-%m-%d")
+            rel["notes"] = [note or "小幅修正"]
+            write_release(rel, os.path.join(root, "release.json"))
+            log(f"release.json → v{new}")
+
+    for f in PERSONAL_FILES:
+        if run("ls-files", "--error-unmatch", f, check=False, quiet=True).returncode == 0:
+            run("rm", "--cached", "--quiet", f, check=False)
+            log(f"停止上傳 {f}（檔案仍留在你的電腦）")
+
+    ident = ()
+    if run("config", "user.email", check=False, quiet=True).returncode != 0:
+        owner = (rel.get("repo") or "user/x").split("/")[0]
+        ident = ("-c", f"user.name={owner}", "-c", f"user.email={owner}@users.noreply.github.com")
+    run("add", "-A")
+    msg = f"v{rel['version']}"
+    body = "\n".join("- " + n for n in rel.get("notes", []))
+    out = run("commit", "-m", msg, *(("-m", body) if body else ()), check=False, extra=ident)
+    if out.returncode != 0 and "nothing to commit" not in (out.stdout + out.stderr):
+        raise RuntimeError(out.stderr.strip() or "commit 失敗")
+    log(f"\n已存好：{msg}")
+    try:
+        run("push", "origin", branch)
+    except RuntimeError as e:
+        log(f"\n上傳到 GitHub 失敗：{e}")
+        log("→ 變更已經存好了。打開 GitHub Desktop，按上方的「Push origin」就完成（不用再填 Summary）。")
+        log("  以後想完全一鍵：安裝 Git for Windows（https://git-scm.com），第一次上傳會跳出瀏覽器登入 GitHub。")
+        return False
+    log(f"\n✓ 已發佈 v{rel['version']} 到 GitHub（{rel.get('repo')}）。")
+    log("  同事開啟軟體時、或執行中每 30 分鐘會檢查到；GitHub 快取約 5 分鐘，最慢幾分鐘內就會跳出更新提示。")
+    return True

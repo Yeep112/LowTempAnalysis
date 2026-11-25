@@ -10,6 +10,7 @@ REM  run_analysis.bat some.toml    run a batch job file (in this window)
 REM  run_analysis.bat menu         text menu (same as tools.bat)
 REM  run_analysis.bat install      Start menu + desktop shortcuts
 REM  run_analysis.bat diag         show diagnostics
+REM  run_analysis.bat publish      developer: upload this version to GitHub
 REM ============================================================
 setlocal EnableExtensions
 set "PYTHONUTF8=1"
@@ -34,6 +35,7 @@ if /i "%ARG%"=="install" goto install
 if /i "%ARG%"=="uninstall" goto uninstall
 if /i "%ARG%"=="update" goto update
 if /i "%ARG%"=="diag" goto diag
+if /i "%ARG%"=="publish" goto publish
 if /i "%~x1"==".db" goto guidb
 "%PYEXE%" -m lta open "%~1"
 pause
@@ -68,6 +70,11 @@ exit /b
 
 :diag
 "%PYEXE%" -m lta diag
+pause
+exit /b
+
+:publish
+"%PYEXE%" -m lta publish
 pause
 exit /b
 
