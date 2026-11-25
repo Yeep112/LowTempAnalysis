@@ -131,7 +131,11 @@ class App:
         T.setup_ttk(self.style, "1D")
 
         root.title("低溫量測分析 Low-Temperature Analysis")
-        root.geometry("1600x940")
+        try:
+            sw, sh = int(root.winfo_screenwidth()), int(root.winfo_screenheight())
+        except Exception:
+            sw, sh = 1920, 1080
+        root.geometry(f"{min(T.px(1600), sw - 40)}x{min(T.px(940), sh - 80)}")
         root.minsize(1200, 720)
         root.configure(bg=T.BG)
         self._build()
@@ -149,6 +153,85 @@ class App:
                 self.open_db(db_path)
             self._scan_dbs(open_newest=not db_path)
         root.after(self.UPDATE_INTERVAL_MS, self._periodic_update_check)
+        if not restore:
+            root.after(1500, self._maybe_whats_new)
+
+    # ================================================================== 更新後：這版新增了什麼
+    def _maybe_whats_new(self):
+        """更新（或手動換成新版）後第一次開啟 → 跳出這次新增的功能。"""
+        if self._dead:
+            return
+        from .. import updater
+        cfg = self.gui_settings
+        running = self._running_version
+        since = cfg.pop("updated_from", None) or cfg.get("last_seen_version")
+        cfg["last_seen_version"] = running
+        ST.save_settings(cfg)
+        if not since or updater.parse_version(running) <= updater.parse_version(since):
+            return
+        if not cfg.get("show_whats_new", True):
+            return
+        rel = updater.read_release()
+        entries = [(v, d, n) for v, d, n in updater.all_notes(rel)
+                   if updater.parse_version(since) < updater.parse_version(v) <= updater.parse_version(running)]
+        if entries:
+            self.show_whats_new(entries, since)
+
+    def show_whats_new(self, entries, since=None):
+        a = T.ACCENTS[self.category]
+        win = tk.Toplevel(self.root)
+        win.title("這版新增了什麼")
+        win.configure(bg=T.CARD)
+        win.transient(self.root)
+        win.resizable(False, True)
+        head = tk.Frame(win, bg=a["main"], padx=18, pady=12)
+        head.pack(fill="x")
+        tk.Label(head, text=f"已更新到 v{entries[0][0]}", bg=a["main"], fg=a.get("on", "white"),
+                 font=T.font(14, "bold")).pack(anchor="w")
+        if since:
+            tk.Label(head, text=f"上次使用的是 v{since}，以下是這段期間新增的功能", bg=a["main"],
+                     fg=T.mix_color(a.get("on", "#ffffff"), a["main"], 0.25), font=T.font(9)).pack(anchor="w")
+        box = ScrollFrame(win)
+        box.pack(fill="both", expand=True, padx=16, pady=(10, 4))
+        body = box.body
+        body.columnconfigure(1, weight=1)
+        r = 0
+        for k, (v, d, notes) in enumerate(entries[:8]):
+            tk.Label(body, text=f"v{v}" + (f"　{d}" if d else ""), bg=T.CARD, fg=a["text"],
+                     font=T.font(10, "bold")).grid(row=r, column=0, columnspan=2, sticky="w", pady=(10 if k else 0, 3))
+            r += 1
+            for n in notes:
+                tk.Label(body, text="✦", bg=T.CARD, fg=a["main"], font=T.font(9)).grid(row=r, column=0, sticky="nw",
+                                                                                       padx=(2, 6), pady=1)
+                tk.Label(body, text=n, bg=T.CARD, fg=T.TEXT, font=T.font(10), wraplength=T.px(470), justify="left",
+                         anchor="w").grid(row=r, column=1, sticky="w", pady=1)
+                r += 1
+        bf = tk.Frame(win, bg=T.CARD, padx=16, pady=10)
+        bf.pack(fill="x")
+        dont = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bf, text="以後更新時不要自動顯示", variable=dont).pack(side="left")
+
+        def close(open_log=False):
+            if dont.get():
+                self.gui_settings["show_whats_new"] = False
+                ST.save_settings(self.gui_settings)
+            win.destroy()
+            if open_log:
+                self.open_settings(tab="更新")
+        ttk.Button(bf, text="知道了", style="Accent.TButton", command=close).pack(side="right")
+        ttk.Button(bf, text="完整更新記錄", style="Ghost.TButton",
+                   command=lambda: close(True)).pack(side="right", padx=6)
+        n_lines = sum(len(n) + 1 for _, _, n in entries[:8])
+        win.geometry(f"{T.px(560)}x{T.px(min(160 + 28 * n_lines, 620))}")
+        try:
+            win.update_idletasks()
+            x = self.root.winfo_rootx() + (self.root.winfo_width() - T.px(560)) // 2
+            y = self.root.winfo_rooty() + 120
+            win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        except Exception:
+            pass
+        win.bind("<Escape>", lambda e: close())
+        return win
 
     # ================================================================== 換配色：重建畫面
     def rebuild(self):
@@ -174,6 +257,7 @@ class App:
         for w in self.root.winfo_children():
             if not isinstance(w, tk.Toplevel):
                 w.destroy()
+        T.apply_scaling(self.root, self.gui_settings.get("ui_scale", "auto"))
         T.apply_theme(self.gui_settings)
         T.apply_mpl_style()
         self.root.configure(bg=T.BG)
@@ -216,9 +300,9 @@ class App:
         left_o, left = card(pw, pad=10)
         mid_o, mid = card(pw, pad=10)
         right_o, right = card(pw, pad=10)
-        pw.add_pane(left_o, stretch=False, size=300, minsize=200)
-        pw.add_pane(mid_o, stretch=False, size=470, minsize=300)
-        pw.add_pane(right_o, stretch=True, minsize=400)
+        pw.add_pane(left_o, stretch=False, size=T.px(300), minsize=T.px(270))
+        pw.add_pane(mid_o, stretch=False, size=T.px(470), minsize=T.px(400))
+        pw.add_pane(right_o, stretch=True, minsize=T.px(400))
         self._build_left(left)
         self._build_middle(mid)
         self._build_right(right)
@@ -232,7 +316,7 @@ class App:
         self.root.bind("<Return>", lambda e: None if isinstance(e.widget, (tk.Entry, ttk.Entry)) else self.plot())
 
     def _build_header(self):
-        h = tk.Frame(self.root, bg=T.HEADER, height=64)
+        h = tk.Frame(self.root, bg=T.HEADER, height=T.px(64))
         h.pack(fill="x")
         logo = tk.Frame(h, bg=T.HEADER)
         logo.pack(side="left", padx=(16, 24), pady=8)
@@ -301,14 +385,15 @@ class App:
         self._mid_paned = vp
         data = tk.Frame(vp, bg=T.CARD)
         prm = tk.Frame(vp, bg=T.CARD)
-        vp.add_pane(data, stretch=True, minsize=150)
-        vp.add_pane(prm, stretch=True, minsize=150)
+        vp.add_pane(data, stretch=True, minsize=T.px(150))
+        vp.add_pane(prm, stretch=True, minsize=T.px(150))
 
         # ---- 資料 ----
         row, _ = section_title(data, "資料", "☰", T.MUTED)
         row.pack(fill="x")
         self.count_chip = Chip(row, "")
         self.count_chip.pack(side="right")
+        self._list_head = row
         fr = tk.Frame(data, bg=T.CARD)
         fr.pack(fill="x", pady=(8, 2))
         tk.Label(fr, text="⌕", bg=T.CARD, fg=T.MUTED, font=T.font(10)).pack(side="left")
@@ -321,11 +406,11 @@ class App:
         tf.pack(fill="both", expand=True, pady=(4, 0))
         cols = ("c", "run", "mode", "T", "pts", "time", "name")
         heads = ("色", "run", "量測", "T (K)", "點數", "時間", "實驗描述")
-        widths = (26, 46, 74, 50, 56, 88, 250)
+        widths = tuple(T.px(w) for w in (26, 46, 74, 50, 56, 88, 250))
         self.tree = ttk.Treeview(tf, columns=cols, show="headings", selectmode="extended")
         for c, hd, w in zip(cols, heads, widths):
             self.tree.heading(c, text=hd, command=lambda c=c: self._sort_by(c))
-            self.tree.column(c, width=w, minwidth=22 if c == "c" else 40, stretch=(c == "name"),
+            self.tree.column(c, width=w, minwidth=T.px(22 if c == "c" else 40), stretch=(c == "name"),
                              anchor="center" if c == "c" else ("w" if c in ("name", "mode", "time") else "e"))
         sb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
@@ -342,15 +427,15 @@ class App:
         bf = tk.Frame(data, bg=T.CARD)
         bf.pack(fill="x", pady=(6, 4))
         ttk.Button(bf, text="全選", style="Small.TButton", command=self._select_all).pack(side="left")
-        ttk.Button(bf, text="清除選取", style="Small.TButton", command=self._clear_sel).pack(side="left", padx=4)
+        ttk.Button(bf, text="清除", style="Small.TButton", command=self._clear_sel).pack(side="left", padx=4)
         self.color_btn = ttk.Button(bf, text="● 顏色", style="Small.TButton",
                                     command=lambda: self._color_menu_at(self.color_btn))
         self.color_btn.pack(side="left")
         self.dedup_btn = ttk.Button(bf, text="⧉ 同溫度留一筆", style="Small.TButton",
                                     command=lambda: self._dedup_menu(self.dedup_btn))
         self.dedup_btn.pack(side="left", padx=4)
-        self.load_chip = Chip(bf, "")
-        self.load_chip.pack(side="right")
+        self.load_chip = Chip(self._list_head, "")
+        self.load_chip.pack(side="right", padx=(0, 6))
 
         # ---- 參數 ----
         head = tk.Frame(prm, bg=T.CARD)
@@ -358,18 +443,21 @@ class App:
         self.prm_icon = tk.Label(head, text="•", bg=T.CARD, fg=T.ACCENTS["1D"]["main"], font=T.font(13, "bold"))
         self.prm_icon.pack(side="left", padx=(0, 6))
         self.prm_title = tk.Label(head, text="參數", bg=T.CARD, fg=T.TEXT, font=T.font(11, "bold"),
-                                  anchor="w", justify="left", wraplength=360)
+                                  anchor="w", justify="left", wraplength=T.px(360))
         self.prm_title.pack(side="left", fill="x", expand=True)
         ttk.Button(head, text="恢復預設", style="Small.TButton", command=self._reset_params).pack(side="right")
         self.help_lab = tk.Label(prm, text="", bg=T.CARD, fg=T.MUTED, font=T.font(9), anchor="w",
-                                 justify="left", wraplength=430)
+                                 justify="left", wraplength=T.px(430))
         self.help_lab.pack(fill="x", pady=(2, 4))
         self.param_scroll = ScrollFrame(prm)
         self.param_scroll.pack(fill="both", expand=True)
         self.param_frame = self.param_scroll.body
+        prm.bind("<Configure>", lambda e: (self.help_lab.configure(wraplength=max(e.width - T.px(16), 120)),
+                                          self.prm_title.configure(wraplength=max(e.width - T.px(140), 100))),
+                 add="+")
 
         disp = tk.Frame(prm, bg=T.CARD)
-        disp.pack(fill="x", pady=(6, 0))
+        disp.pack(side="bottom", fill="x", pady=(6, 0), before=self.param_scroll)
         self.legend_var = tk.StringVar(value=LEGENDS[0])
         self.cmap_var = tk.StringVar(value="自動")
         self.sort_var = tk.StringVar(value=SORTS[0])
@@ -385,7 +473,7 @@ class App:
             row=1, column=0, columnspan=6, sticky="w", pady=(6, 0))
 
         btn = tk.Frame(prm, bg=T.CARD)
-        btn.pack(fill="x", pady=(8, 0))
+        btn.pack(side="bottom", fill="x", pady=(8, 0), before=disp)
         ttk.Button(btn, text="▶  繪圖", style="Accent.TButton", command=self.plot).pack(side="left", fill="x", expand=True)
         ttk.Button(btn, text="⬇ 存圖", style="Ghost.TButton", command=self.save_figure).pack(side="left", padx=(6, 0))
         ttk.Button(btn, text="⇩ CSV", style="Ghost.TButton", command=self.export_csv).pack(side="left", padx=(6, 0))
@@ -415,8 +503,8 @@ class App:
         vp.pack(fill="both", expand=True, pady=(4, 0))
         figf = tk.Frame(vp, bg=T.CARD)
         txtf = tk.Frame(vp, bg=T.CARD)
-        vp.add_pane(figf, stretch=True, minsize=200)
-        vp.add_pane(txtf, stretch=False, minsize=60)
+        vp.add_pane(figf, stretch=True, minsize=T.px(200))
+        vp.add_pane(txtf, stretch=False, minsize=T.px(60))
         self._right_paned = vp
         self.root.after(400, self._init_sash)
         self.fig = Figure(figsize=(4, 3), layout="constrained")
@@ -473,8 +561,11 @@ class App:
         saved = self.gui_settings.get("panes") or {}
         try:
             if saved.get("main"):
-                for i, pos in enumerate(saved["main"]):
-                    self._main_paned.set_sash(i, pos)
+                a, b = saved["main"]
+                a = max(int(a), T.px(280))               # 舊版存的位置可能太窄 → 至少留給文字的寬度
+                b = max(int(b), a + T.px(410))
+                self._main_paned.set_sash(0, a)
+                self._main_paned.set_sash(1, b)
             h = int(self._mid_paned.winfo_height() or 0)
             if saved.get("mid"):
                 self._mid_paned.set_sash(0, saved["mid"])
@@ -801,8 +892,8 @@ class App:
         for ax in prim:
             gs = ax.get_subplotspec().get_topmost_subplotspec().get_gridspec()
             rows, cols = max(rows, gs.nrows), max(cols, gs.ncols)
-        pw = int(self.plot_style.get("panel_w", 520))
-        ph = int(self.plot_style.get("panel_h", 380))
+        pw = int(int(self.plot_style.get("panel_w", 520)) * T.PX)       # 設定值以 100% 大小為準
+        ph = int(int(self.plot_style.get("panel_h", 380)) * T.PX)
         return (cols * pw if cols > 1 else 0, rows * ph if rows > 1 else 0)
 
     def _schedule_layout(self):
@@ -1274,7 +1365,7 @@ class App:
                 self._text_boxes[(store, prm.key)] = box
             else:
                 tk.Label(self.param_frame, text=prm.label, bg=T.CARD, fg=T.MUTED, font=T.font(9),
-                         anchor="w", justify="left", wraplength=190).grid(row=row, column=0, sticky="w", pady=3)
+                         anchor="w", justify="left", wraplength=T.px(190)).grid(row=row, column=0, sticky="w", pady=3)
                 if prm.kind == "choice":
                     w = ttk.Combobox(self.param_frame, textvariable=var, values=prm.choices,
                                      state="readonly", width=22)
@@ -1284,7 +1375,7 @@ class App:
             row += 1
             if prm.tip:
                 tk.Label(self.param_frame, text="↳ " + prm.tip, bg=T.CARD, fg=T.FAINT, font=T.font(8),
-                         wraplength=400, justify="left", anchor="w").grid(row=row, column=0, columnspan=2,
+                         wraplength=T.px(400), justify="left", anchor="w").grid(row=row, column=0, columnspan=2,
                                                                           sticky="w", pady=(0, 3))
                 row += 1
         if not a.params:
@@ -1527,11 +1618,11 @@ class App:
         tr = ttk.Treeview(self.param_frame, columns=cols, show="headings", height=6, selectmode="browse")
         tr.heading("run", text="run")
         tr.heading("T", text="T (K)")
-        tr.column("run", width=46, anchor="e", stretch=False)
-        tr.column("T", width=46, anchor="e", stretch=False)
+        tr.column("run", width=T.px(46), anchor="e", stretch=False)
+        tr.column("T", width=T.px(46), anchor="e", stretch=False)
         for q in a.per_item_params:
             tr.heading(q.key, text=q.label)
-            tr.column(q.key, width=96 if q.kind != "text" else 130, anchor="e" if q.kind != "text" else "w")
+            tr.column(q.key, width=T.px(96 if q.kind != "text" else 130), anchor="e" if q.kind != "text" else "w")
         tr.tag_configure("manual", foreground=acc["text"], background=acc["soft"])
         self.item_hint = tk.Label(self.param_frame, text="", bg=acc["main"], fg=acc.get("on", "white"),
                                   font=T.font(9, "bold"), anchor="w", padx=8, pady=3)
@@ -1542,7 +1633,7 @@ class App:
         tips = [f"{q.label}：{q.tip}" for q in a.per_item_params if q.tip]
         if tips:
             tk.Label(self.param_frame, text="↳ " + "　".join(tips), bg=T.CARD, fg=T.FAINT, font=T.font(8),
-                     wraplength=410, justify="left", anchor="w").grid(row=row + 3, column=0, columnspan=2, sticky="w")
+                     wraplength=T.px(410), justify="left", anchor="w").grid(row=row + 3, column=0, columnspan=2, sticky="w")
         self.item_tree = tr
         self._item_cols = cols
         self._refresh_item_table()
@@ -2234,6 +2325,8 @@ class App:
 
     def do_update(self, info=None):
         self.status("正在下載更新…", "busy")
+        self.gui_settings["updated_from"] = self._running_version     # 重開後顯示「這版新增了什麼」
+        ST.save_settings(self.gui_settings)
 
         def work():
             try:
@@ -2649,7 +2742,7 @@ class App:
         win = tk.Toplevel(self.root)
         ids = ", ".join(str(it.run_id) for it in self.last_items)
         win.title(f"{a.name} — run {ids}")
-        win.geometry("1000x700")
+        win.geometry(f"{T.px(1000)}x{T.px(700)}")
         win.configure(bg=T.CARD)
         fig = Figure(figsize=(4, 3), layout="constrained")
         canvas = SmoothCanvas(fig, master=win)
@@ -2688,7 +2781,9 @@ def prepare(root):
             tkfont.nametofont(name).configure(family=T.FONT_FAMILY, size=10)
     except Exception:
         pass
-    T.apply_theme(ST.load_settings())       # 使用者選的介面配色、數據顏色循環
+    cfg = ST.load_settings()
+    T.apply_scaling(root, cfg.get("ui_scale", "auto"))   # 依螢幕解析度 / 設定調整介面大小
+    T.apply_theme(cfg)                      # 使用者選的介面配色、數據顏色循環
     T.apply_mpl_style()
 
 

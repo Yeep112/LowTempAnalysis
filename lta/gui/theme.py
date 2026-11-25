@@ -68,6 +68,77 @@ def font(size=10, weight="normal"):
     return (FONT_FAMILY, size, weight)
 
 
+# ---------------------------------------------------------------------------
+# 介面大小（依螢幕自動判斷，或在設定裡選 80%–175%）
+# ---------------------------------------------------------------------------
+UI_FACTOR = 1.0       # 使用者選的（或自動判斷的）倍率
+PX = 1.0              # 像素倍率 = Windows 縮放 × UI_FACTOR（欄寬、分隔線、對話框大小用）
+SCREEN = {}           # 偵測到的螢幕資訊
+_BASE_DPI = None      # 第一次偵測到的 DPI（之後改 tk scaling 不會影響它）
+SCALE_CHOICES = [("自動（依螢幕判斷）", "auto"), ("80%", 0.8), ("90%", 0.9), ("100%", 1.0), ("110%", 1.1),
+                 ("125%", 1.25), ("150%", 1.5), ("175%", 1.75)]
+
+
+def px(n):
+    """設計時的像素數 → 這台螢幕上實際要用的像素數。"""
+    return int(round(n * PX))
+
+
+def detect_screen(root):
+    """螢幕解析度、Windows 縮放 → 建議的介面大小。"""
+    global _BASE_DPI
+    if _BASE_DPI is None:
+        try:
+            _BASE_DPI = float(root.winfo_fpixels("1i"))
+        except Exception:
+            _BASE_DPI = 96.0
+        if not (48 <= _BASE_DPI <= 480):
+            _BASE_DPI = 96.0
+    try:
+        sw, sh = int(root.winfo_screenwidth()), int(root.winfo_screenheight())
+    except Exception:
+        sw, sh = 1920, 1080
+    win_scale = _BASE_DPI / 96.0
+    lw, lh = sw / win_scale, sh / win_scale          # Windows 縮放後實際可用的「邏輯」大小
+    # Windows 的縮放已經考慮了文字大小；這裡只補兩種情況：
+    #   高解析度卻沒放大（例如 4K 用 100%）→ 字太小，放大；可用畫面太小（筆電）→ 縮小一點才放得下
+    if lh >= 2000:
+        auto, why = 1.5, "高解析度但 Windows 沒有放大（例如 4K 用 100%），放大文字才看得清楚"
+    elif lh >= 1600:
+        auto, why = 1.25, "高解析度、Windows 縮放偏低，放大一點文字才不會太小"
+    elif lw < 1400 or lh < 820:
+        auto, why = 0.9, "可用畫面較小（例如筆電），縮小一點放得下"
+    else:
+        auto, why = 1.0, "一般螢幕，Windows 縮放已經合適"
+    return dict(width=sw, height=sh, dpi=_BASE_DPI, win_scale=win_scale, logical=(round(lw), round(lh)),
+                auto=auto, why=why)
+
+
+def apply_scaling(root, setting="auto"):
+    """設定介面大小：字型（tk scaling）與像素尺寸（px）一起放大縮小；圖也會跟著。"""
+    global UI_FACTOR, PX, SCREEN
+    SCREEN = detect_screen(root)
+    try:
+        f = SCREEN["auto"] if setting in (None, "", "auto") else float(setting)
+    except (TypeError, ValueError):
+        f = SCREEN["auto"]
+    f = min(max(f, 0.6), 2.5)
+    UI_FACTOR = f
+    PX = SCREEN["win_scale"] * f
+    try:
+        root.tk.call("tk", "scaling", SCREEN["dpi"] / 72.0 * f)
+    except Exception:
+        pass
+    return SCREEN
+
+
+def scale_label(setting):
+    for label, v in SCALE_CHOICES:
+        if v == setting or (v != "auto" and setting not in (None, "", "auto") and abs(float(v) - float(setting)) < 1e-6):
+            return label
+    return SCALE_CHOICES[0][0]
+
+
 def setup_ttk(style, accent):
     """ttk 元件樣式（clam 主題可以自由上色）。切換 1D/2D 時重新呼叫以更新主色。"""
     a = ACCENTS[accent]
@@ -110,7 +181,7 @@ def setup_ttk(style, accent):
 
     # 清單
     style.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=TEXT,
-                    rowheight=26, borderwidth=0, font=font(10))
+                    rowheight=px(26), borderwidth=0, font=font(10))
     style.map("Treeview", background=[("selected", a["soft"])], foreground=[("selected", a["text"])])
     style.configure("Treeview.Heading", background=SUBTLE, foreground=MUTED, relief="flat",
                     borderwidth=0, font=font(9, "bold"), padding=(4, 5))

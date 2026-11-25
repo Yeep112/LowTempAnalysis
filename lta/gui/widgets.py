@@ -92,11 +92,27 @@ class Segmented(tk.Frame):
             t.pack(anchor="w")
             s.pack(anchor="w")
             b.grid(row=0, column=i, sticky="nsew", padx=1)
-            self.columnconfigure(i, weight=1)
+            self.columnconfigure(i, weight=1, uniform="seg")
             for w in (b, t, s):
                 w.bind("<Button-1>", lambda e, i=i: self.select(i))
             self.buttons.append((key, b, t, s))
+            t._full, t._short = title, f"{key} 分析"
+        self._compact = None
+        self.bind("<Configure>", self._fit)
         self.paint()
+
+    def _fit(self, event):
+        """太窄時改成短標題、藏起副標，不會被切掉。"""
+        compact = event.width < T.px(290)
+        if compact == self._compact:
+            return
+        self._compact = compact
+        for key, b, t, s in self.buttons:
+            t.configure(text=t._short if compact else t._full)
+            if compact:
+                s.pack_forget()
+            else:
+                s.pack(anchor="w")
 
     def select(self, i, notify=True):
         if i == self.active and notify:
@@ -131,11 +147,27 @@ class FeatureList(tk.Frame):
         self.cards = {}
         self.selected = None
         self.accent = "1D"
+        self._wrap_labels = []
+        self._wrap = T.px(210)
+        self.bind("<Configure>", self._rewrap)
+
+    def _rewrap(self, event=None):
+        """文字寬度跟著欄寬走（欄變窄也不會被切掉）。"""
+        w = max((event.width if event is not None else self.winfo_width()) - T.px(70), 120)
+        if abs(w - self._wrap) < 6:
+            return
+        self._wrap = w
+        for lab in self._wrap_labels:
+            try:
+                lab.configure(wraplength=w)
+            except tk.TclError:
+                pass
 
     def set_items(self, analyses, accent, selected_name):
         for w in self.winfo_children():
             w.destroy()
         self.cards = {}
+        self._wrap_labels = []
         self.accent = accent
         group = None
         for a in analyses:
@@ -158,14 +190,15 @@ class FeatureList(tk.Frame):
         txt = tk.Frame(fr, bg=T.CARD, cursor="hand2")
         txt.pack(side="left", fill="x", expand=True, pady=6, padx=(0, 6))
         title = tk.Label(txt, text=a.name, bg=T.CARD, fg=T.TEXT, font=T.font(10, "bold"),
-                         anchor="w", justify="left", wraplength=210, cursor="hand2")
+                         anchor="w", justify="left", wraplength=self._wrap, cursor="hand2")
         title.pack(fill="x")
         desc_text = (a.help.split("。")[0] if a.help else "")
         if a.modes is not None:
             desc_text = f"[{a.modes_text}] " + desc_text
         desc = tk.Label(txt, text=desc_text, bg=T.CARD, fg=T.MUTED, font=T.font(8),
-                        anchor="w", justify="left", wraplength=210, cursor="hand2")
+                        anchor="w", justify="left", wraplength=self._wrap, cursor="hand2")
         desc.pack(fill="x")
+        self._wrap_labels += [title, desc]
         widgets = (fr, txt, icon, title, desc)
         for w in widgets:
             w.bind("<Button-1>", lambda e, n=a.name: self.select(n))
@@ -210,7 +243,7 @@ class Paned(tk.PanedWindow):
     """可拖曳的分隔區塊。拖曳時只顯示一條線，放開才重新排版 → 不會卡頓（ttk.Panedwindow 會一直重畫）。"""
 
     def __init__(self, parent, orient="horizontal"):
-        super().__init__(parent, orient=orient, opaqueresize=False, sashwidth=8, sashrelief="flat",
+        super().__init__(parent, orient=orient, opaqueresize=False, sashwidth=T.px(8), sashrelief="flat",
                          bg=T.BG, bd=0, showhandle=False, sashpad=0)
         self._horizontal = orient == "horizontal"
 

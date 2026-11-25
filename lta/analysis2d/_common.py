@@ -144,7 +144,7 @@ def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_li
     labels = (x 軸, y 軸, z 軸)"""
     xl, yl, zl = labels
     if cut:
-        gs = fig.add_gridspec(1, 2, width_ratios=[1.45, 1])
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.45, 1], wspace=0.04)   # 色條與右圖之間留空間
         ax = fig.add_subplot(gs[0])
         ax_cut = fig.add_subplot(gs[1])
     else:

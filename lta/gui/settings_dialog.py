@@ -40,7 +40,7 @@ class SettingsDialog:
         self.cfg = dict(app.gui_settings)
         self.win = win = tk.Toplevel(app.root)
         win.title("設定")
-        win.geometry(geometry or "820x660")
+        win.geometry(geometry or f"{T.px(820)}x{T.px(680)}")
         win.configure(bg=T.BG)
         win.transient(app.root)
         self.base_var = tk.StringVar(value=self._current_base())
@@ -83,7 +83,7 @@ class SettingsDialog:
         tk.Label(parent, text=text, bg=T.CARD, fg=T.TEXT, font=T.font(11, "bold"), anchor="w").pack(fill="x", pady=(6, 0))
         if sub:
             tk.Label(parent, text=sub, bg=T.CARD, fg=T.FAINT, font=T.font(9), anchor="w", justify="left",
-                     wraplength=700).pack(fill="x", pady=(0, 6))
+                     wraplength=T.px(700)).pack(fill="x", pady=(0, 6))
 
     def _swatch(self, parent, color, w=3, cmd=None):
         lab = tk.Label(parent, text=" " * w, bg=color, relief="flat", bd=0, cursor="hand2" if cmd else "",
@@ -101,6 +101,26 @@ class SettingsDialog:
 
     # ------------------------------------------------------------------ 外觀
     def _tab_theme(self, f):
+        # ---- 介面大小 ----
+        self._h(f, "介面大小", None)
+        srow = tk.Frame(f, bg=T.CARD)
+        srow.pack(fill="x", pady=(2, 2))
+        cur = self.cfg.get("ui_scale", "auto")
+        self.scale_var = tk.StringVar(value=T.scale_label(cur))
+        ttk.Combobox(srow, textvariable=self.scale_var, values=[l for l, _ in T.SCALE_CHOICES], state="readonly",
+                     width=20).pack(side="left")
+        ttk.Button(srow, text="套用", style="Accent.TButton", command=self._apply_scale).pack(side="left", padx=8)
+        sc = T.SCREEN or {}
+        if sc:
+            auto_lab = next((l for l, v in T.SCALE_CHOICES if v == sc["auto"]), f"{sc['auto']:.0%}")
+            info = (f"偵測到：螢幕 {sc['width']}×{sc['height']}，Windows 縮放 {sc['win_scale']:.0%}"
+                    f"（可用畫面約 {sc['logical'][0]}×{sc['logical'][1]}）→ 自動選 {auto_lab}：{sc['why']}。"
+                    f"　目前使用 {T.UI_FACTOR:.0%}")
+        else:
+            info = "（尚未偵測螢幕）"
+        tk.Label(f, text=info, bg=T.CARD, fg=T.MUTED, font=T.font(9), wraplength=T.px(740),
+                 justify="left").pack(anchor="w", pady=(2, 8))
+
         self._h(f, "介面顏色", None)
         row = tk.Frame(f, bg=T.CARD)
         row.pack(fill="x", pady=(4, 8))
@@ -109,10 +129,11 @@ class SettingsDialog:
         for name, c in SWATCHES.items():
             cell = tk.Frame(row, bg=T.CARD)
             cell.pack(side="left", padx=(0, 10))
-            cv = tk.Canvas(cell, width=52, height=52, bg=T.CARD, highlightthickness=0, cursor="hand2")
+            d = T.px(52)
+            cv = tk.Canvas(cell, width=d, height=d, bg=T.CARD, highlightthickness=0, cursor="hand2")
             cv.pack()
-            cv.create_oval(6, 6, 46, 46, fill=c, outline=T.BORDER, width=1)
-            ring = cv.create_oval(2, 2, 50, 50, outline="", width=2.5)
+            cv.create_oval(d * .12, d * .12, d * .88, d * .88, fill=c, outline=T.BORDER, width=1)
+            ring = cv.create_oval(d * .04, d * .04, d * .96, d * .96, outline="", width=max(2, T.px(2.5)))
             tk.Label(cell, text=name, bg=T.CARD, fg=T.TEXT, font=T.font(9)).pack()
             cv.bind("<Button-1>", lambda e, col=c: self._choose_base(col))
             self._circles[c] = (cv, ring)
@@ -135,7 +156,7 @@ class SettingsDialog:
         self._kind_lab.pack(side="left", padx=8)
         tk.Label(f, text="淺色（例如薰衣草紫）會直接當作背景；較深或較飽和的顏色會當作重點色；很深的顏色會自動切成"
                  "深色版面。文字對比會自動調整，換成什麼顏色都看得清楚。可輸入 #RRGGBB 或 R, G, B。",
-                 bg=T.CARD, fg=T.MUTED, font=T.font(9), wraplength=740, justify="left").pack(anchor="w", pady=(2, 8))
+                 bg=T.CARD, fg=T.MUTED, font=T.font(9), wraplength=T.px(740), justify="left").pack(anchor="w", pady=(2, 8))
         self.base_var.trace_add("write", lambda *a: self._update_preview())
 
         self._h(f, "預覽", None)
@@ -167,6 +188,19 @@ class SettingsDialog:
                  font=T.font(9)).pack(side="left", padx=10)
         self._update_preview()
 
+    def _apply_scale(self):
+        """換介面大小 → 立刻重建畫面（資料與選取都保留）。"""
+        label = self.scale_var.get()
+        val = next((v for l, v in T.SCALE_CHOICES if l == label), "auto")
+        cfg = self.app.gui_settings
+        cfg["ui_scale"] = val
+        cfg.pop("panes", None)                   # 分隔線位置依新的大小重新安排
+        ST.save_settings(cfg)
+        self.win.destroy()
+        new_app = self.app.rebuild()
+        new_app.status(f"介面大小：{label}（{T.UI_FACTOR:.0%}）", "ok")
+        SettingsDialog(new_app, tab="外觀")
+
     def _mark_circle(self, color):
         for c, (cv, ring) in self._circles.items():
             cv.itemconfigure(ring, outline=T.ACCENTS["1D"]["main"] if c == color else "")
@@ -193,7 +227,7 @@ class SettingsDialog:
             w.destroy()
         box = tk.Frame(self._preview, bg=t["BG"], highlightthickness=1, highlightbackground=t["BORDER"])
         box.pack(anchor="w")
-        hd = tk.Frame(box, bg=t["HEADER"], width=520, height=34)
+        hd = tk.Frame(box, bg=t["HEADER"], width=T.px(520), height=T.px(34))
         hd.pack(fill="x")
         tk.Label(hd, text="  ◢ 低溫量測分析", bg=t["HEADER"], fg=t["HEADER_TEXT"], font=T.font(10, "bold")).pack(side="left", pady=5)
         tk.Label(hd, text=" ⚙ 設定 ", bg=t["HEADER_2"], fg=t["HEADER_TEXT"], font=T.font(9)).pack(side="right", padx=8)
@@ -426,6 +460,8 @@ class SettingsDialog:
                  fg=T.MUTED).pack(anchor="w", pady=(2, 8))
         self.auto_upd = tk.BooleanVar(value=self.app.gui_settings.get("auto_update_check", True))
         ttk.Checkbutton(f, text="開啟軟體時與執行中（每 30 分鐘）自動檢查更新", variable=self.auto_upd).pack(anchor="w")
+        self.show_new = tk.BooleanVar(value=self.app.gui_settings.get("show_whats_new", True))
+        ttk.Checkbutton(f, text="更新後第一次開啟時，顯示「這版新增了什麼」", variable=self.show_new).pack(anchor="w")
         row = tk.Frame(f, bg=T.CARD)
         row.pack(fill="x", pady=8)
         ttk.Button(row, text="立即檢查更新", style="Ghost.TButton",
@@ -455,11 +491,11 @@ class SettingsDialog:
             for n in notes:
                 tk.Label(body, text="‧", bg=T.CARD, fg=T.MUTED).grid(row=r, column=0, sticky="nw", padx=(6, 4))
                 tk.Label(body, text=n, bg=T.CARD, fg=T.TEXT, anchor="w", justify="left",
-                         wraplength=640).grid(row=r, column=1, sticky="w")
+                         wraplength=T.px(640)).grid(row=r, column=1, sticky="w")
                 r += 1
         tk.Label(f, text="更新時會先把目前的程式備份到工具資料夾的 _backup\\（保留最近 3 份）；"
                  "設定、jobs 裡的設定檔、資料總表都不會被覆蓋。", bg=T.CARD, fg=T.FAINT,
-                 font=T.font(9), wraplength=700, justify="left").pack(anchor="w", pady=(6, 0))
+                 font=T.font(9), wraplength=T.px(700), justify="left").pack(anchor="w", pady=(6, 0))
 
     def _rollback(self):
         from .. import updater
@@ -497,6 +533,8 @@ class SettingsDialog:
         cfg["cycle"] = list(self.cycle)
         if hasattr(self, "auto_upd"):
             cfg["auto_update_check"] = bool(self.auto_upd.get())
+        if hasattr(self, "show_new"):
+            cfg["show_whats_new"] = bool(self.show_new.get())
         ST.save_settings(cfg)
 
         # settings.toml
