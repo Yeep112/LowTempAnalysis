@@ -94,6 +94,8 @@ class Analysis:
     order: int = 100
     item_defaults: Callable | None = None   # (items, p) -> {run_id: {key: 預設值}}，給逐筆設定表顯示
     store: str | None = None    # 設定群組：同群組的分析共用參數值與逐筆設定（預設 = 自己的名稱）
+    compute: Callable | None = None   # (items, p, progress) -> data：在背景執行的計算，結果放在 p["_data"]
+    progressive: bool = False   # True = 計算中可以先畫已完成的那幾筆
 
     @property
     def store_key(self):
@@ -118,7 +120,8 @@ class Analysis:
 
 
 def analysis(category, name, params=None, help="", multi=True, modes=None,
-             group="基本", icon="•", order=100, item_defaults=None, store=None):
+             group="基本", icon="•", order=100, item_defaults=None, store=None, compute=None,
+             progressive=False):
     """登錄一個分析功能（裝飾器）。
 
     逐筆參數：P(..., per_item=True)。函式收到的 p[key] 是 {run_id: 使用者設定的值}
@@ -126,12 +129,16 @@ def analysis(category, name, params=None, help="", multi=True, modes=None,
     item_defaults(items, p) 回傳每筆的預設值，介面的逐筆設定表會顯示它。
     圖上可拖曳的線或點：artist.lta_drag = (key, run_id)，拖完介面會自動更新該筆的值。
     進階拖曳（上下拖、右鍵選單）：artist.lta_drag = Drag(...)，見下面的 Drag。
-    store="另一個分析的名稱"：和那個分析共用參數值與逐筆設定（例如轉折點、Ic 擬合共用線性化的 edge）。"""
+    store="另一個分析的名稱"：和那個分析共用參數值與逐筆設定（例如轉折點、Ic 擬合共用線性化的 edge）。
+    compute=fn：慢的計算 fn(items, p, progress) 會在背景執行（介面不會卡住、顯示進度），
+                結果放在 p["_data"] 給繪圖函式用；progress(k, n, 說明) 回報進度。
+    progressive=True：計算中先用已完成的那幾筆畫圖（每筆獨立的分析才適合）。"""
     def deco(func):
         lst = ANALYSES[category]
         lst[:] = [a for a in lst if a.name != name]        # 重新載入時不重複
         lst.append(Analysis(category, name, func, params or [], help, multi,
-                            tuple(modes) if modes else None, group, icon, order, item_defaults, store))
+                            tuple(modes) if modes else None, group, icon, order, item_defaults, store,
+                            compute, progressive))
         lst.sort(key=lambda a: (a.order, a.name))
         return func
     return deco

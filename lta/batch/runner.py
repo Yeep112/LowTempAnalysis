@@ -29,15 +29,35 @@ def load_toml(path):
             raise SystemExit(f"設定檔格式錯誤 {path}\n  {e}")
 
 
+def user_dir():
+    """每台電腦、每個使用者自己的資料夾（%LOCALAPPDATA%\\LowTempAnalysis），不在工具資料夾裡。"""
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    d = os.path.join(base, "LowTempAnalysis")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def settings_path():
+    """settings.toml 的位置：放在使用者資料夾，所以換工具資料夾、從 GitHub 更新都不會遺失或被上傳。
+
+    第一次執行時：工具資料夾裡如果有舊的 settings.toml 就搬過來（複製），沒有就用範本建立。"""
+    import shutil
+    path = os.path.join(user_dir(), "settings.toml")
+    if not os.path.exists(path):
+        old = os.path.join(TOOL_ROOT, "settings.toml")
+        example = os.path.join(TOOL_ROOT, "settings.example.toml")
+        for src in (old, example):
+            if os.path.exists(src):
+                try:
+                    shutil.copy2(src, path)
+                except OSError:
+                    continue
+                break
+    return path
+
+
 def load_settings():
-    path = os.path.join(TOOL_ROOT, "settings.toml")
-    example = os.path.join(TOOL_ROOT, "settings.example.toml")
-    if not os.path.exists(path) and os.path.exists(example):
-        import shutil
-        try:
-            shutil.copy2(example, path)            # 第一次使用：從範本建立
-        except OSError:
-            pass
+    path = settings_path()
     return load_toml(path) if os.path.exists(path) else {}
 
 

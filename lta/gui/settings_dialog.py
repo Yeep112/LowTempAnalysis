@@ -1,7 +1,7 @@
 """⚙ 設定視窗：介面配色、預設數據顏色、資料與輸出、啟動與安裝、關於。
 
 設定存在 %LOCALAPPDATA%\\LowTempAnalysis\\gui_settings.json；
-資料夾與輸出格式寫回工具資料夾的 settings.toml（批次分析也會用）。
+資料夾與輸出格式寫到 %LOCALAPPDATA%\\LowTempAnalysis\\settings.toml（批次分析也會用）。
 """
 from __future__ import annotations
 
@@ -328,6 +328,15 @@ class SettingsDialog:
         self.fmt_var = tk.StringVar(value=s.get("fig_format", "jpg"))
         ttk.Combobox(grid, textvariable=self.fmt_var, values=["jpg", "png", "pdf", "svg"], state="readonly",
                      width=8).grid(row=1, column=1, padx=8, sticky="w")
+        from ..batch.runner import settings_path
+        sp = settings_path()
+        self._h(f, "設定檔位置", "這些設定存在你電腦的使用者資料夾，不在工具資料夾裡：換工具資料夾、從 GitHub 更新或上傳，"
+                "都不會遺失也不會被上傳。")
+        row2 = tk.Frame(f, bg=T.CARD)
+        row2.pack(fill="x")
+        tk.Label(row2, text=sp, bg=T.CARD, fg=T.TEXT, font=T.font(9)).pack(side="left")
+        ttk.Button(row2, text="開啟資料夾", style="Small.TButton",
+                   command=lambda: self._open(os.path.dirname(sp))).pack(side="left", padx=8)
 
     def _browse_root(self):
         d = filedialog.askdirectory(title="選擇資料夾", initialdir=self.root_var.get() or os.path.expanduser("~"),
@@ -464,7 +473,8 @@ class SettingsDialog:
         ST.save_settings(cfg)
 
         # settings.toml
-        path = os.path.join(TOOL_ROOT, "settings.toml")
+        from ..batch.runner import settings_path
+        path = settings_path()
         try:
             root_dir = self.root_var.get().strip()
             if "'" in root_dir:

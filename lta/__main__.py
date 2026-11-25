@@ -195,6 +195,8 @@ def cmd_diag(a, settings):
               f"　可用：{', '.join(cands[:6]) or '無'}")
     except Exception as e:
         print(f"圖中中文字型  檢查失敗：{e}")
+    from .batch.runner import settings_path
+    print(f"設定檔        {settings_path()}")
     root = settings.get("data_root")
     print(f"data_root     {root}  {'（存在）' if root and os.path.isdir(root) else '（不存在 → 在軟體的 ⚙ 設定裡改）'}")
     from .gui.launcher import log_dir
@@ -380,7 +382,8 @@ def cmd_menu(a, settings):
                 _startfile(os.path.join(TOOL_ROOT, "catalog.xlsx"))
         elif c == "9":
             _startfile(JOBS_DIR)
-            _startfile(os.path.join(TOOL_ROOT, "settings.toml"))
+            from .batch.runner import settings_path
+            _startfile(settings_path())
             continue
         elif c in ("s", "S"):
             _sub("install")

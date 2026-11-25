@@ -325,12 +325,14 @@ class IcFitter:
                     self.notes.append(f"⚠ Ic {name}：AB 自由擬合的 Tc = {ab['params']['Tc']:.2f} K，"
                                       f"高於實際歸零的 {c['Tc_hi']:.2f} K → AB 形狀與資料不符")
 
-    def run_all(self, sns_curves=("inner",), shared_spec="Stage 3 (p=2)"):
-        self.stage1()
-        self.stage2()
-        self.stage3(1)
-        self.stage3(2)
-        self.stage4(sns_curves, shared_spec)
+    def run_all(self, sns_curves=("inner",), shared_spec="Stage 3 (p=2)", progress=None):
+        steps = [("Stage 1：自由 power law", self.stage1), ("Stage 2：bulk Tc", self.stage2),
+                 ("Stage 3：共用 Tc（p=1）", lambda: self.stage3(1)), ("Stage 3：共用 Tc（p=2）", lambda: self.stage3(2)),
+                 ("Stage 4：JJ 模型", lambda: self.stage4(sns_curves, shared_spec))]
+        for k, (label, fn) in enumerate(steps):
+            if progress:
+                progress(k, len(steps), f"Ic 擬合 {label}")
+            fn()
         for res in self.results.values():
             if res["at_bound"]:
                 self.notes.append(f"⚠ [{res['stage']}] Ic {res['curve']} {res['label']}："

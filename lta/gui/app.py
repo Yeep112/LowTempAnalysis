@@ -58,6 +58,10 @@ CATS = ["1D", "2D"]
 ASSETS = os.path.join(TOOL_ROOT, "assets")
 
 
+class _Cancelled(Exception):
+    """背景計算已經過時（參數又改了），停止。"""
+
+
 class App:
     UPDATE_INTERVAL_MS = 30 * 60 * 1000      # 執行中每 30 分鐘檢查一次新版本
 
@@ -82,6 +86,11 @@ class App:
         self.last_items = []
         self._click_cid = None
         self._plot_job = None
+        self._compute_gen = 0
+        self._compute_job = None
+        self._history, self._redo = [], []
+        self._undoing = False
+        self._legdrag = None
         self._suspend = False
         self._gen = 0
         self._queue = queue.Queue()
@@ -136,7 +145,8 @@ class App:
                      current={c: a.name for c, a in self.current.items()},
                      selection=list(self.tree.selection()), filters=dict(self._filters),
                      filter=self.filter_var.get(), db_paths=dict(self._db_paths),
-                     update_info=self._update_info, prompted=self._prompted_version)
+                     update_info=self._update_info, prompted=self._prompted_version,
+                     history=(self._history, self._redo))
         self._dead = True
         self._gen += 1
         for w in self.root.winfo_children():
@@ -168,6 +178,7 @@ class App:
             self.tree.selection_set(sel)
             self._on_select()
         self._prompted_version = st["prompted"]
+        self._history, self._redo = st.get("history", ([], []))
         if st["update_info"]:
             self._on_update_info(st["update_info"], False, None)
 
@@ -194,6 +205,9 @@ class App:
 
         self.root.bind("<F5>", lambda e: self.refresh())
         self.root.bind("<Control-s>", lambda e: self.save_figure())
+        self.root.bind("<Control-z>", self.undo)
+        self.root.bind("<Control-y>", self.redo)
+        self.root.bind("<Control-Z>", self.redo)
         self.root.bind("<Return>", lambda e: None if isinstance(e.widget, (tk.Entry, ttk.Entry)) else self.plot())
 
     def _build_header(self):
@@ -300,6 +314,7 @@ class App:
         self.tree.bind("<Control-a>", lambda e: (self._select_all(), "break")[1])
         self.tree.bind("<Button-3>", self._tree_menu)
         self.tree.bind("<Button-2>", self._tree_menu)
+        self.tree.bind("<Motion>", self._tree_motion, add="+")
         bf = tk.Frame(data, bg=T.CARD)
         bf.pack(fill="x", pady=(6, 4))
         ttk.Button(bf, text="全選", style="Small.TButton", command=self._select_all).pack(side="left")
@@ -396,6 +411,9 @@ class App:
         w.bind("<Shift-MouseWheel>", lambda e: self._plot_wheel(e, horizontal=True), add="+")
         w.bind("<Button-4>", lambda e: self._plot_wheel(e, delta=120), add="+")
         w.bind("<Button-5>", lambda e: self._plot_wheel(e, delta=-120), add="+")
+        w.bind("<Control-MouseWheel>", self._zoom_wheel)
+        w.bind("<Control-Button-4>", lambda e: self._zoom_wheel(e, delta=120))
+        w.bind("<Control-Button-5>", lambda e: self._zoom_wheel(e, delta=-120))
         self.toolbar = FitToolbar(self.canvas, figf, self._fit_view, pack_toolbar=False)
         tb_bg = T.CARD if not T.DARK else "#e5e7eb"
         try:
@@ -444,6 +462,16 @@ class App:
         if ov.get("suptitle"):
             self.fig.suptitle(self._label_value(ov["suptitle"]))
         axes = self._label_axes()
+        for idx, pos in (ov.get("legend") or {}).items():
+            k = int(idx)
+            if k < len(axes) and axes[k].get_legend() is not None:
+                self._place_legend(axes[k].get_legend(), axes[k], *pos)
+        for idx, hidden in (ov.get("hidden") or {}).items():
+            k = int(idx)
+            if k < len(axes) and hidden:
+                self._apply_hidden(axes[k], hidden, rescale=False)
+                axes[k].relim(visible_only=True)
+                axes[k].autoscale_view()
         for idx, d in (ov.get("axes") or {}).items():
             k = int(idx)
             if k >= len(axes):
@@ -513,7 +541,184 @@ class App:
         ttk.Button(bf, text="完成", style="Accent.TButton", command=lambda: apply(True)).pack(side="right")
         ttk.Button(bf, text="套用", style="Ghost.TButton", command=apply).pack(side="right", padx=6)
         ttk.Button(bf, text="全部恢復自動", style="Ghost.TButton", command=reset).pack(side="left")
+
+        def restore_legends():
+            ov.pop("legend", None)
+            ov.pop("hidden", None)
+            self._save_per_run()
+            self.plot()
+        ttk.Button(bf, text="顯示隱藏的曲線、圖例回原位", style="Ghost.TButton",
+                   command=restore_legends).pack(side="left", padx=6)
         return win
+
+    # ---------------------------------------------------------------- 圖例：點一下隱藏 / 顯示，拖曳移動
+    @staticmethod
+    def _legend_handles(leg):
+        return list(getattr(leg, "legend_handles", None) or getattr(leg, "legendHandles", []))
+
+    def _legend_at(self, event):
+        """滑鼠下面的圖例 → (legend, axes) 或 None。"""
+        if event.x is None:
+            return None
+        for ax in self.fig.axes:
+            leg = ax.get_legend()
+            if leg is None or not leg.get_visible():
+                continue
+            try:
+                if leg.get_window_extent().contains(event.x, event.y):
+                    return leg, ax
+            except Exception:
+                pass
+        return None
+
+    def _legend_press(self, event):
+        hit = self._legend_at(event)
+        if hit is None:
+            return False
+        leg, ax = hit
+        bb = leg.get_window_extent()
+        self._legdrag = dict(leg=leg, ax=ax, x=event.x, y=event.y, x0=bb.x0, y0=bb.y0, moved=False, bg=None)
+        return True
+
+    @staticmethod
+    def _place_legend(leg, ax, xa, ya):
+        leg.set_bbox_to_anchor((xa, ya), transform=ax.transAxes)
+        try:
+            leg.set_loc("lower left")
+        except Exception:
+            leg._loc = 3
+
+    def _legend_motion(self, event):
+        d = self._legdrag
+        if event.x is None:
+            return
+        dx, dy = event.x - d["x"], event.y - d["y"]
+        if not d["moved"]:
+            if abs(dx) + abs(dy) < 4:
+                return
+            d["moved"] = True
+            self.hover.paused = True
+            self.hover._hide_all()
+            try:
+                d["leg"].set_animated(True)
+                self.canvas.draw()
+                d["bg"] = self.canvas.copy_from_bbox(self.fig.bbox)
+            except Exception:
+                d["bg"] = None
+        xa, ya = d["ax"].transAxes.inverted().transform((d["x0"] + dx, d["y0"] + dy))
+        self._place_legend(d["leg"], d["ax"], xa, ya)
+        d["pos"] = (float(xa), float(ya))
+        if d["bg"] is not None:
+            try:
+                self.canvas.restore_region(d["bg"])
+                d["ax"].draw_artist(d["leg"])
+                self.canvas.blit(self.fig.bbox)
+                return
+            except Exception:
+                d["bg"] = None
+        self.canvas.draw_idle()
+
+    def _legend_release(self, event):
+        d, self._legdrag = self._legdrag, None
+        self.hover.paused = False
+        a = self.current[self.category]
+        ov = self.labels.setdefault(a.name, {})
+        axes = self._label_axes()
+        idx = str(axes.index(d["ax"])) if d["ax"] in axes else None
+        if d["moved"]:
+            d["leg"].set_animated(False)
+            if idx is not None and "pos" in d:
+                ov.setdefault("legend", {})[idx] = [round(v, 4) for v in d["pos"]]
+                self._save_per_run()
+            self.canvas.draw_idle()
+            self.status("圖例已移動（會記住位置；✎ 標題與軸標籤 → 圖例回到原位）", "ok")
+            return
+        # 沒有移動 = 點一下：隱藏 / 顯示那一項
+        leg = d["leg"]
+        label = None
+        for t, h in zip(leg.get_texts(), self._legend_handles(leg)):
+            try:
+                if t.get_window_extent().contains(d["x"], d["y"]) or h.get_window_extent().contains(d["x"], d["y"]):
+                    label = t.get_text()
+                    break
+            except Exception:
+                continue
+        if label is None or idx is None:
+            return
+        hidden = ov.setdefault("hidden", {}).setdefault(idx, [])
+        if label in hidden:
+            hidden.remove(label)
+        else:
+            hidden.append(label)
+        self._apply_hidden(d["ax"], hidden)
+        self._save_per_run()
+        self.canvas.draw_idle()
+        self.status(f"「{label}」{'已隱藏' if label in hidden else '已顯示'}（再點一下圖例可切換）", "ok")
+
+    def _apply_hidden(self, ax, hidden, rescale=True):
+        """把圖例名稱在 hidden 裡的曲線藏起來，圖例那一項變淡；Y 範圍只算看得到的資料。"""
+        changed = False
+        for art in list(ax.lines) + list(ax.collections) + list(ax.patches):
+            lab = art.get_label()
+            if not lab or lab.startswith("_"):
+                continue
+            vis = lab not in hidden
+            if art.get_visible() != vis:
+                art.set_visible(vis)
+                changed = True
+        leg = ax.get_legend()
+        if leg is not None:
+            for t, h in zip(leg.get_texts(), self._legend_handles(leg)):
+                off = t.get_text() in hidden
+                t.set_alpha(0.35 if off else 1.0)
+                try:
+                    h.set_alpha(0.25 if off else 1.0)
+                except Exception:
+                    pass
+        if changed and rescale and not any(getattr(c, "lta_grid", None) is not None for c in ax.collections):
+            ax.relim(visible_only=True)
+            ax.autoscale_view()
+            self._home_limits[ax] = (ax.get_xlim(), ax.get_ylim())
+
+    # ---------------------------------------------------------------- Ctrl + 滾輪：以滑鼠位置為中心縮放
+    def _zoom_wheel(self, event, delta=None):
+        d = delta if delta is not None else getattr(event, "delta", 0)
+        if not d:
+            return "break"
+        try:
+            conv = getattr(self.canvas, "_event_mpl_coords", None)
+            if conv is not None:
+                x, y = conv(event)
+            else:
+                w = self.canvas.get_tk_widget()
+                x, y = w.canvasx(event.x), self.fig.bbox.height - w.canvasy(event.y)
+            x, y = float(x), float(y)
+        except Exception:
+            return "break"
+        cbars = ST.colorbar_axes(self.fig)
+        target = None
+        for ax in self.fig.axes:
+            if ax in cbars or not ax.axison or not ax.get_navigate():
+                continue
+            if ax.bbox.contains(x, y):
+                target = ax
+        if target is None:
+            return "break"
+        f = 0.8 if d > 0 else 1.25
+        try:
+            self.toolbar.push_current()
+        except Exception:
+            pass
+        xd, yd = target.transData.inverted().transform((x, y))
+        for axis, c, get, setl in ((target.xaxis, xd, target.get_xlim, target.set_xlim),
+                                   (target.yaxis, yd, target.get_ylim, target.set_ylim)):
+            tr = axis.get_transform()
+            lo, hi = tr.transform(get())
+            tc = tr.transform([c])[0]
+            nlo, nhi = tc + (lo - tc) * f, tc + (hi - tc) * f
+            setl(*tr.inverted().transform([nlo, nhi]))
+        self.canvas.draw_idle()
+        return "break"
 
     # ---------------------------------------------------------------- 多張圖的排版與捲動
     def _primary_axes(self, fig=None):
@@ -694,7 +899,9 @@ class App:
                  anchor="w").pack(side="left", fill="x", expand=True)
         from .. import __version__
         tk.Label(bar, text=f"v{__version__}", bg=T.CARD, fg=T.FAINT, font=T.font(8, "bold")).pack(side="right", padx=(4, 10))
-        tk.Label(bar, text="F5 重新整理 · Ctrl+S 存圖 · Enter 繪圖 · Ctrl+A 全選", bg=T.CARD,
+        self.progress_lab = tk.Label(bar, text="", bg=T.CARD, fg=T.ACCENTS["1D"]["text"], font=T.font(9))
+        self.progress_bar = ttk.Progressbar(bar, length=160, mode="determinate")
+        tk.Label(bar, text="F5 重新整理 · Ctrl+S 存圖 · Ctrl+Z/Y 復原/重做 · Ctrl+滾輪 縮放", bg=T.CARD,
                  fg=T.FAINT, font=T.font(8)).pack(side="right", padx=6)
 
     # ================================================================== 主色
@@ -842,6 +1049,12 @@ class App:
                             self.status(self.status_var.get().replace("背景載入中…", "全部載入完成"), "ok")
                 elif kind == "status":
                     self.status(*data)
+                elif kind == "progress":
+                    self._on_progress(*data)
+                elif kind == "computed":
+                    self._on_computed(*data)
+                elif kind == "compute_error":
+                    self._on_compute_error(*data)
                 elif kind == "update":
                     self._on_update_info(*data)
                 elif kind == "updated":
@@ -852,7 +1065,7 @@ class App:
                     messagebox.showerror("更新失敗", f"{data}\n\n可以在 ⚙ 設定 → 更新 裡還原上一版。", parent=self.root)
         except queue.Empty:
             pass
-        self.root.after(200, self._poll_queue)
+        self.root.after(60 if self._compute_job else 200, self._poll_queue)
 
     # ================================================================== run 清單
     def _visible_runs(self):
@@ -1119,7 +1332,8 @@ class App:
             params = {st: v for st, v in self.saved_params.items() if v}
             if params:
                 allc[self.db.name]["__params__"] = params
-            labels = {an: v for an, v in self.labels.items() if v.get("suptitle") or v.get("axes")}
+            labels = {an: v for an, v in self.labels.items()
+                      if v.get("suptitle") or v.get("axes") or v.get("legend") or any((v.get("hidden") or {}).values())}
             if labels:
                 allc[self.db.name]["__labels__"] = labels
             with open(path, "w", encoding="utf-8") as f:
@@ -1127,17 +1341,101 @@ class App:
         except OSError as e:
             self.status(f"無法儲存逐筆設定：{e}", "warn")
 
-    def set_item_value(self, key, run_id, value):
-        """逐筆設定：寫入一個值（空字串 = 恢復預設）。圖上拖曳也會呼叫這裡。"""
+    def set_item_value(self, key, run_id, value, record=True):
+        """逐筆設定：寫入一個值（空字串 = 恢復預設）。圖上拖曳也會呼叫這裡。可以 Ctrl+Z 復原。"""
         a = self.current[self.category]
-        store = self.per_run.setdefault(a.store_key, {}).setdefault(key, {})
+        self._set_raw(a.store_key, key, run_id, value, record)
+        self._save_per_run()
+        self._refresh_item_table()
+
+    def _set_raw(self, store_key, key, run_id, value, record=True):
+        store = self.per_run.setdefault(store_key, {}).setdefault(key, {})
+        old = store.get(int(run_id), "")
         text = "" if value is None else str(value).strip()
+        if text == old:
+            return
         if text == "":
             store.pop(int(run_id), None)
         else:
             store[int(run_id)] = text
+        if record and not self._undoing:
+            change = (store_key, key, int(run_id), old, text)
+            if getattr(self, "_history_group", None) is not None:
+                self._history_group.append(change)
+            else:
+                self._push_history([change])
+
+    # ---------------------------------------------------------------- 復原 / 重做（逐筆設定）
+    def _push_history(self, changes):
+        if not changes:
+            return
+        self._history.append(changes)
+        del self._history[:-200]
+        self._redo.clear()
+        self._update_undo_buttons()
+
+    def _begin_group(self):
+        self._history_group = []
+
+    def _end_group(self):
+        group, self._history_group = self._history_group, None
+        self._push_history(group)
+
+    @staticmethod
+    def _describe(changes):
+        st, key, rid, old, new = changes[0]
+        more = f"（共 {len(changes)} 項）" if len(changes) > 1 else ""
+        return f"run {rid} {key}：{old or '（預設）'} → {new or '（預設）'}{more}"
+
+    def _focus_is_text(self):
+        w = self.root.focus_get()
+        return isinstance(w, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox, ttk.Spinbox))
+
+    def undo(self, event=None):
+        if event is not None and self._focus_is_text():
+            return None
+        if not self._history:
+            self.status("沒有可以復原的動作", "warn")
+            return "break"
+        changes = self._history.pop()
+        self._apply_changes(changes, undo=True)
+        self._redo.append(changes)
+        self.status("已復原：" + self._describe(changes) + "　（Ctrl+Y 重做）", "ok")
+        return "break"
+
+    def redo(self, event=None):
+        if event is not None and self._focus_is_text():
+            return None
+        if not self._redo:
+            self.status("沒有可以重做的動作", "warn")
+            return "break"
+        changes = self._redo.pop()
+        self._apply_changes(changes, undo=False)
+        self._history.append(changes)
+        self.status("已重做：" + self._describe(changes), "ok")
+        return "break"
+
+    def _apply_changes(self, changes, undo):
+        self._undoing = True
+        try:
+            for st, key, rid, old, new in (reversed(changes) if undo else changes):
+                self._set_raw(st, key, rid, old if undo else new, record=False)
+        finally:
+            self._undoing = False
         self._save_per_run()
         self._refresh_item_table()
+        self._update_undo_buttons()
+        self._schedule_plot(delay=30)
+
+    def _update_undo_buttons(self):
+        for name, stack in (("undo_btn", self._history), ("redo_btn", self._redo)):
+            b = getattr(self, name, None)
+            if b is None:
+                continue
+            try:
+                b.configure(state="normal" if stack else "disabled")
+            except tk.TclError:
+                pass
 
     def _build_item_table(self, a, row):
         acc = T.ACCENTS[self.category]
@@ -1146,6 +1444,11 @@ class App:
         tk.Label(head, text="▤ 逐筆設定", bg=T.CARD, fg=acc["text"], font=T.font(10, "bold")).pack(side="left")
         ttk.Button(head, text="清除選取 run 的設定", style="Small.TButton",
                    command=self._clear_item_values).pack(side="right")
+        self.redo_btn = ttk.Button(head, text="↷ 重做", style="Small.TButton", command=self.redo)
+        self.redo_btn.pack(side="right", padx=(0, 4))
+        self.undo_btn = ttk.Button(head, text="↶ 復原", style="Small.TButton", command=self.undo)
+        self.undo_btn.pack(side="right", padx=(0, 4))
+        self._update_undo_buttons()
         tk.Label(self.param_frame, text="雙擊格子修改，按 Enter 確定；清空 = 用預設（括號內）。"
                  "有個別設定的列會變色，也可以在圖上直接拖曳標記。",
                  bg=T.CARD, fg=T.FAINT, font=T.font(8), wraplength=410, justify="left",
@@ -1335,12 +1638,14 @@ class App:
         a = self.current[self.category]
         ids = {int(i) for i in self.tree.selection()}
         own = {q.key for q in a.per_item_params}
-        for key, vals in self.per_run.get(a.store_key, {}).items():
+        self._begin_group()
+        for key, vals in list(self.per_run.get(a.store_key, {}).items()):
             if key not in own:
                 continue
             for rid in list(vals):
                 if rid in ids:
-                    vals.pop(rid)
+                    self._set_raw(a.store_key, key, rid, "")
+        self._end_group()
         self._save_per_run()
         self._refresh_item_table()
         self._schedule_plot(delay=100)
@@ -1378,6 +1683,8 @@ class App:
 
     def _drag_press(self, event):
         if str(getattr(self.toolbar, "mode", "")):
+            return
+        if event.button == 1 and self._legend_press(event):
             return
         if event.button == 3:
             ln = self._near_draggable(event)
@@ -1427,6 +1734,9 @@ class App:
         self.hover.paused = False
 
     def _drag_motion(self, event):
+        if self._legdrag is not None:
+            self._legend_motion(event)
+            return
         if self._drag is None:
             near = self._near_draggable(event) if event.inaxes is not None else None
             cursor = ""
@@ -1458,6 +1768,9 @@ class App:
         return self.per_run.get(a.store_key, {}).get(key, {}).get(int(rid), "")
 
     def _drag_release(self, event):
+        if self._legdrag is not None:
+            self._legend_release(event)
+            return
         if self._drag is None:
             return
         drag, self._drag = self._drag, None
@@ -1500,6 +1813,19 @@ class App:
             menu.tk_popup(x, y)
         finally:
             menu.grab_release()
+
+    def _tree_motion(self, event):
+        """滑鼠移到「色」欄的圓點：說明這筆有自訂顏色、怎麼清除。"""
+        try:
+            col, row = self.tree.identify_column(event.x), self.tree.identify_row(event.y)
+        except Exception:
+            return
+        key = (col, row)
+        if key == getattr(self, "_tree_tip", None):
+            return
+        self._tree_tip = key
+        if col == "#1" and row and int(row) in self.run_colors:
+            self.status(f"run {row} 有自訂顏色 {self.run_colors[int(row)]}（右鍵 → 清除顏色 可恢復自動）", "info")
 
     # ---------------------------------------------------------------- 數據顏色
     def _tree_menu(self, event):
@@ -1845,6 +2171,8 @@ class App:
             self.status(f"讀取資料失敗：{e}", "error")
             return
         if not items:
+            self._compute_gen += 1
+            self._set_busy(None)
             self._welcome()
             return
         if not a.multi:
@@ -1852,15 +2180,110 @@ class App:
         bad = sorted({MODES.get(it.mode, {"short": it.mode})["short"] for it in items if not a.supports(it.mode)})
         self._set_plot_header(a, items)
         if bad:
+            self._compute_gen += 1
+            self._set_busy(None)
             self._message(f"「{a.name}」不支援 {'、'.join(bad)} 的資料",
                           f"這個功能支援：{a.modes_text}\n請換一個功能，或改選其他 run")
             self.status(f"{a.name}：資料模式不符", "warn")
             return
-        t0 = time.time()
-        self.root.config(cursor="watch")
-        self.root.update_idletasks()
         try:
             params = self._params()
+        except Exception as e:
+            self._show_error(a, e)
+            return
+        if a.compute is not None:
+            self._start_compute(a, items, params)
+        else:
+            self._compute_gen += 1
+            self._set_busy(None)
+            self._show(a, items, params)
+
+    # ---------------------------------------------------------------- 背景計算
+    def _start_compute(self, a, items, params):
+        """慢的計算放到背景：介面不會卡住，狀態列顯示進度；可以先畫已完成的那幾筆。"""
+        self._compute_gen += 1
+        gen = self._compute_gen
+        job = dict(gen=gen, a=a, items=items, params=params, t0=time.time(), partial_k=0, partial_t=0.0)
+        self._compute_job = job
+        self._set_busy((0, len(items), "準備中…"))
+
+        def progress(k, n, text=""):
+            if gen != self._compute_gen or self._dead:
+                raise _Cancelled()
+            self._queue.put(("progress", (gen, k, n, text)))
+
+        def work():
+            try:
+                data = a.compute(items, dict(params), progress)
+                self._queue.put(("computed", (gen, data)))
+            except _Cancelled:
+                pass
+            except Exception as e:
+                self._queue.put(("compute_error", (gen, e, traceback.format_exc())))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_progress(self, gen, k, n, text):
+        job = self._compute_job
+        if job is None or gen != job["gen"]:
+            return
+        self._set_busy((k, n, text))
+        # 每筆獨立的分析：先畫已經算好的那幾筆（至少間隔 0.6 秒，避免一直重畫）
+        a = job["a"]
+        if a.progressive and n == len(job["items"]) and k >= 2 and k > job["partial_k"] \
+                and time.time() - job["partial_t"] > 0.6:
+            job["partial_k"] = k
+            self._show(a, job["items"][:k], job["params"], partial=(k, n))
+            job["partial_t"] = time.time()
+
+    def _on_computed(self, gen, data):
+        job = self._compute_job
+        if job is None or gen != job["gen"]:
+            return
+        self._compute_job = None
+        params = dict(job["params"])
+        params["_data"] = data
+        self._set_busy(None)
+        self._show(job["a"], job["items"], params, t0=job["t0"])
+
+    def _on_compute_error(self, gen, err, tb):
+        job = self._compute_job
+        if job is None or gen != job["gen"]:
+            return
+        self._compute_job = None
+        self._set_busy(None)
+        print(tb, file=sys.stderr)
+        self._show_error(job["a"], err, tb)
+
+    def _set_busy(self, state):
+        """state = (k, n, 說明) 顯示進度；None = 結束。"""
+        try:
+            if state is None:
+                self.progress_bar.pack_forget()
+                self.progress_lab.pack_forget()
+                return
+            k, n, text = state
+            self.progress_bar.configure(maximum=max(n, 1), value=k)
+            self.progress_lab.configure(text=f"{text}　{k}/{n}" if n else text)
+            if not self.progress_bar.winfo_ismapped():
+                self.progress_lab.pack(side="right", padx=(4, 8))
+                self.progress_bar.pack(side="right", pady=3)
+        except tk.TclError:
+            pass
+
+    def _show_error(self, a, e, tb=None):
+        if tb is None:
+            traceback.print_exc()
+        self.result = None
+        self._draggables = []
+        self._message("發生錯誤", str(e), error=True)
+        self._set_text(f"{a.name} 發生錯誤", tb or traceback.format_exc(), error=True)
+        self.status(f"錯誤：{e}", "error")
+
+    def _show(self, a, items, params, partial=None, t0=None):
+        """在主執行緒畫圖（背景計算的結果在 params["_data"]）。"""
+        t0 = t0 or time.time()
+        self.root.config(cursor="watch")
+        try:
             self.hover.reset()
             if self._click_cid is not None:
                 self.canvas.mpl_disconnect(self._click_cid)
@@ -1873,10 +2296,12 @@ class App:
             self._plot_need = self._panel_need()
             self._layout_plot()
             self.root.update_idletasks()
-            self._set_hint(res.hint)
+            self._set_hint(res.hint if not partial else f"計算中，先顯示已完成的 {partial[0]} / {partial[1]} 筆…")
             self.canvas.draw()
             self._home_limits = self._remember_view()
             self._fit_view()
+            if partial:
+                return
             self.result, self.last_items = res, items
             if res.on_click:
                 self._click_cid = self.canvas.mpl_connect("button_press_event",
@@ -1890,12 +2315,9 @@ class App:
                 self._highlight_item(self._hl_run)
             self.status(f"完成：{a.name}，{len(items)} 筆，{time.time() - t0:.2f} s", "ok")
         except Exception as e:
-            traceback.print_exc()
-            self.result = None
-            self._draggables = []
-            self._message("發生錯誤", str(e), error=True)
-            self._set_text(f"{a.name} 發生錯誤", traceback.format_exc(), error=True)
-            self.status(f"錯誤：{e}", "error")
+            if partial:
+                return                      # 部分結果畫不出來沒關係，等完整結果
+            self._show_error(a, e)
         finally:
             self.root.config(cursor="")
 
@@ -1930,10 +2352,9 @@ class App:
         except tk.TclError:
             pass
 
-    @staticmethod
-    def _wrap_click(handler, toolbar):
+    def _wrap_click(self, handler, toolbar):
         def on_click(event):
-            if str(getattr(toolbar, "mode", "")):
+            if str(getattr(toolbar, "mode", "")) or self._legend_at(event) is not None:
                 return
             handler(event)
         return on_click

@@ -5,6 +5,7 @@
   負側 edge、正側 edge、疊圖平移、內插修補區間（把指定電流範圍的尖峰換成直線內插）
 沒有個別設定的 run 用上面的 edges（可依溫度內插）。
 """
+import threading
 from collections import OrderedDict
 
 import numpy as np
@@ -61,6 +62,7 @@ def item_settings(items, p):
 
 _CACHE = OrderedDict()      # 同樣的資料與設定不重算（拖曳、改其他參數時很快）
 _CACHE_MAX = 600
+_LOCK = threading.Lock()    # 背景計算與畫圖同時使用快取
 
 
 def process(it, neg, pos, width, ylog=True, despike=True, ranges=()):
@@ -68,15 +70,26 @@ def process(it, neg, pos, width, ylog=True, despike=True, ranges=()):
     結果會快取；回傳的陣列請不要直接修改。"""
     key = (id(it.ds), it.run_id, float(neg), float(pos), float(width), bool(ylog), bool(despike),
            tuple(tuple(r) for r in ranges))
-    hit = _CACHE.get(key)
-    if hit is not None and hit[0] is it.ds:
-        _CACHE.move_to_end(key)
-        return hit[1]
+    with _LOCK:
+        hit = _CACHE.get(key)
+        if hit is not None and hit[0] is it.ds:
+            _CACHE.move_to_end(key)
+            return hit[1]
     out = _process(it, neg, pos, width, ylog, despike, ranges)
-    _CACHE[key] = (it.ds, out)
-    while len(_CACHE) > _CACHE_MAX:
-        _CACHE.popitem(last=False)
+    with _LOCK:
+        _CACHE[key] = (it.ds, out)
+        while len(_CACHE) > _CACHE_MAX:
+            _CACHE.popitem(last=False)
     return out
+
+
+def _warm(items, p, progress):
+    """背景先把每筆算好（之後畫圖直接用快取）。"""
+    settings = item_settings(items, p)
+    for k, it in enumerate(items):
+        progress(k, len(items), f"線性化 run {it.run_id}")
+        neg, pos, off, ranges = settings[it.run_id]
+        process(it, neg, pos, p["width"], p["ylog"], p["despike"], ranges)
 
 
 def _process(it, neg, pos, width, ylog, despike, ranges):
@@ -95,7 +108,7 @@ def _process(it, neg, pos, width, ylog, despike, ranges):
     return dict(x_uA=x / 1e-6, y=y, I_uA=I_uA, V_raw=V_mV, V_clean=V_clean, fit=fit, n_patch=n_patch)
 
 
-@analysis("1D", NAME, group="進階", icon="╱", order=110,
+@analysis("1D", NAME, group="進階", icon="╱", order=110, compute=_warm, progressive=True,
           modes=("current_bias",), item_defaults=defaults, params=EDGE_PARAMS[:2] + [
     P("ylog", "Y 軸用 log10", True),
 ] + EDGE_PARAMS[2:] + [

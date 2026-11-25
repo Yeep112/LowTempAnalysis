@@ -15,6 +15,8 @@ from ..core.registry import P, Result, analysis
 from ..core import icfit
 from . import linearized as LIN
 from . import step_transitions as ST
+from . import transitions as D2
+from ._ic_rules import RULES, apply as apply_rules, parse_floats, parse_zero_from, duplicate_note
 
 VIEWS = ["最終圖（總覽）", "轉折位置 + Ic vs T", "Stage 1：power law（自由 Tc, p, q）",
          "Stage 2：power law（固定 bulk Tc）", "Stage 3：共用 Tc", "Stage 4：接面 / 薄膜模型",
@@ -23,13 +25,15 @@ CURVE_COLORS = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple", 
 EXP_COLORS = ["#1f4e79", "#d35400", "#1e7b34", "#9b1c1c", "#5b2c83", "#6d4c2f"]
 FIT_STYLES = ["-", "--", "-.", ":"]
 
+SOURCES = ["log dV/dI 台階（轉折點追蹤）", "IV 二次微分"]
+
 PARAMS = [
     P("ic_view", "顯示", VIEWS[0], choices=VIEWS),
-    P("ic_curves", "Ic 的定義　名稱: 正側線, 負側線", "outer: outer +, outer -; inner: inner +, inner -",
-      tip="線名稱和「轉折點追蹤」的轉折線設定相同。要多一條：…; center: center +, center -"),
-    P("missing_zero", "找不到的轉折位置視為 0", True),
-    P("zero_from", "強制 Ic = 0（曲線: 從幾 K 起）", "", tip="例：inner: 2.6　（notebook 的 INNER_ZERO_ABOVE_K）"),
-    P("exclude_T", "排除的溫度 (K)", "", tip="例：3.8　這些溫度完全不使用（notebook 的 NO_TRANSITION_TEMPERATURES）"),
+    P("ic_source", "轉折點來源", SOURCES[0], choices=SOURCES,
+      tip="和「轉折點追蹤 + I vs T」或「IV 轉折點（二次微分）」用同一組設定（含手動修改的紅點）"),
+    P("ic_curves", "Ic 的定義（台階來源）　名稱: 正側線, 負側線", "outer: outer +, outer -; inner: inner +, inner -",
+      tip="線名稱和「轉折點追蹤」的轉折線設定相同。要多一條：…; center: center +, center -。二次微分來源固定為 outer、inner"),
+] + RULES + [
     P("extra_zero_T", "額外 Ic = 0 的溫度 (K)", "",
       tip="沒有選到、但已知 Ic = 0 的溫度，例如 3.1；用來決定 Tc 的上限"),
     P("T_bulk", "bulk Tc (K)", 7.2),
@@ -63,24 +67,6 @@ def parse_curves(text):
         out.append((name, lines[0], lines[1]))
     if not out:
         raise ValueError("Ic 的定義是空的")
-    return out
-
-
-def parse_floats(text, name):
-    try:
-        return [float(x) for x in str(text or "").replace("，", ",").replace(" ", ",").split(",") if x.strip()]
-    except ValueError:
-        raise ValueError(f"「{name}」需要用逗號分開的數字")
-
-
-def parse_zero_from(text):
-    out = {}
-    for part in _split(text):
-        part = part.replace("：", ":").replace(">=", ":").replace("≥", ":")
-        if ":" not in part:
-            raise ValueError(f"強制 Ic = 0 的格式是「曲線: 溫度」，例如 inner: 2.6，收到：{part}")
-        n, T = (s.strip() for s in part.split(":", 1))
-        out[n] = float(T)
     return out
 
 
@@ -140,11 +126,22 @@ def read_csv_positions(path):
     raise ValueError("CSV 需要有 T_K 欄（寬格式）或 line / T_K / I_uA 欄（長格式）")
 
 
-def gather(items, p):
+def gather(items, p, progress=None):
     """→ dict(Ts, pos, Ic, curve_defs, source)"""
+    defs = parse_curves(p["ic_curves"])
+    note = ""
     if str(p.get("csv", "")).strip():
         Ts, pos = read_csv_positions(p["csv"])
         source = f"CSV：{os.path.basename(str(p['csv']).strip().strip(chr(34)))}"
+    elif p.get("ic_source") == SOURCES[1]:
+        data = D2.compute(items, p, progress)
+        Ts = data["xs"]
+        pos = {n: data["raw_I"][:, k] for k, n in enumerate(D2.NAMES)}
+        defs = D2.CURVE_DEFS
+        source = f"選取的 {len(data['items'])} 筆 run（IV 二次微分）"
+        note = duplicate_note(data["items"])
+        if not data["has_T"]:
+            raise ValueError("Ic 擬合需要每筆 run 的溫度")
     else:
         items = sorted(items, key=lambda it: (it.T is None, it.T or 0, it.run_id))
         data = ST.compute(items, p)
@@ -154,11 +151,9 @@ def gather(items, p):
         Ts = np.array([q["T"] for q in data["processed"]], float)
         pos = {n: np.array([tab[r][n] for r in runs]) * 1e-3 for n in names}
         source = f"選取的 {len(runs)} 筆 run（轉折點追蹤的設定與手動修改）"
-    defs = parse_curves(p["ic_curves"])
-    Ts, pos, Ic = icfit.ic_table(Ts, pos, defs, p["missing_zero"], parse_zero_from(p["zero_from"]),
-                                 parse_floats(p["exclude_T"], "排除的溫度"),
-                                 parse_floats(p["extra_zero_T"], "額外 Ic = 0 的溫度"))
-    return dict(Ts=Ts, pos=pos, Ic=Ic, defs=defs, source=source)
+        note = duplicate_note(items)
+    Ts, pos, Ic = apply_rules(Ts, pos, defs, p, parse_floats(p["extra_zero_T"], "額外 Ic = 0 的溫度"))
+    return dict(Ts=Ts, pos=pos, Ic=Ic, defs=defs, source=source, note=note)
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +251,8 @@ def plot_final(ax, fitter, Ts, final, small=False):
 # 文字
 # ---------------------------------------------------------------------------
 def report(d, fitter, missing):
-    out = [f"資料來源：{d['source']}", "", "Ic (mA)", "  T(K) " + "".join(f"{n:>11s}" for n in d["Ic"])]
+    out = [f"資料來源：{d['source']}"] + ([d["note"]] if d.get("note") else []) + \
+        ["", "Ic (mA)", "  T(K) " + "".join(f"{n:>11s}" for n in d["Ic"])]
     for k, T in enumerate(d["Ts"]):
         out.append(f"  {T:5.2f}" + "".join(f"{v[k]:+11.4f}" if np.isfinite(v[k]) else f"{'--':>11s}"
                                          for v in d["Ic"].values()))
@@ -297,27 +293,27 @@ def report(d, fitter, missing):
 _FIT_CACHE = {}
 
 
-def fit_all(d, p):
+def fit_all(d, p, progress=None):
     """所有擬合（同樣的資料與設定直接用上次的結果）。"""
     key = (d["Ts"].tobytes(), tuple((n, v.tobytes()) for n, v in d["Ic"].items()),
            bool(p["tc_bracket"]), float(p["T_bulk"]), float(p["t0_max"]), str(p["sns_curves"]), str(p["shared_tc"]))
     if key in _FIT_CACHE:
         return _FIT_CACHE[key]
-    fitter = _fit_all(d, p)
+    fitter = _fit_all(d, p, progress)
     if len(_FIT_CACHE) > 30:
         _FIT_CACHE.clear()
     _FIT_CACHE[key] = fitter
     return fitter
 
 
-def _fit_all(d, p):
+def _fit_all(d, p, progress=None):
     curves = {n: icfit.prepare_curve(d["Ts"], v) for n, v in d["Ic"].items()}
     empty = [n for n, c in curves.items() if c is None]
     fitter = icfit.IcFitter(curves, p["tc_bracket"], p["T_bulk"], p["t0_max"])
     if not fitter.curves:
         raise ValueError("所有 Ic 都是 0 或沒有資料，無法擬合")
     sns = [s.strip() for s in str(p["sns_curves"]).replace("，", ",").split(",") if s.strip()]
-    fitter.run_all(sns, p["shared_tc"])
+    fitter.run_all(sns, p["shared_tc"], progress=progress)
     if empty:
         fitter.notes.insert(0, f"Ic {', '.join(empty)} 沒有非零點，未擬合")
     return fitter
@@ -326,12 +322,22 @@ def _fit_all(d, p):
 # ---------------------------------------------------------------------------
 # 介面
 # ---------------------------------------------------------------------------
+def _compute_hook(items, p, progress):
+    if p.get("ic_source") != SOURCES[1] and not str(p.get("csv", "")).strip():
+        ST.warm(items, p, progress)
+    d = gather(items, p, progress)
+    return dict(d=d, fitter=fit_all(d, p, progress))
+
+
 @analysis("1D", "Ic vs T 擬合（power law / AB / SNS）", group="進階", icon="↘", order=114,
-          modes=("current_bias",), store=LIN.STORE, params=PARAMS,
-          help="轉折位置來自「轉折點追蹤 + I vs T」（同一組設定，含手動修改的紅點）。Ic = 正側 − 負側。")
+          modes=("current_bias",), store=LIN.STORE, params=PARAMS, compute=_compute_hook,
+          help="轉折位置來自「轉折點追蹤」或「IV 二次微分」（同一組設定，含手動修改的紅點）。Ic = 正側 − 負側。")
 def ic_vs_T(fig, items, p):
-    d = gather(items, p)
-    fitter = fit_all(d, p)
+    if p.get("_data"):
+        d, fitter = p["_data"]["d"], p["_data"]["fitter"]
+    else:
+        d = gather(items, p)
+        fitter = fit_all(d, p)
     final = parse_final(p["final"])
     view = p["ic_view"]
     missing = []
@@ -350,7 +356,7 @@ def ic_vs_T(fig, items, p):
         title = view.replace("：", ": ")
         plot_stage(fig.add_subplot(111), fitter, Ts, res, title)
     text, export = report(d, fitter, missing or [f"{c}: {m}" for c, m in final if fitter.find(c, m) is None])
-    return Result(text=text, export=export)
+    return Result(text=text, export=export, hint="點圖例可隱藏 / 顯示該曲線；拖曳圖例可移動位置")
 
 
 def _grid(axs, d, fitter, Ts, final):

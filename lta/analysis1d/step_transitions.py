@@ -76,6 +76,23 @@ def compute(items, p):
                 unknown=sorted(unknown), manual=manual)
 
 
+def warm(items, p, progress=None):
+    """背景先把每筆的線性化 dV/dI 算好（之後畫圖直接用快取）。"""
+    settings = LIN.item_settings(items, p)
+    for k, it in enumerate(items):
+        if progress:
+            progress(k, len(items), f"線性化 run {it.run_id}")
+        neg, pos, off, ranges = settings[it.run_id]
+        LIN.process(it, neg, pos, p["width"], True, p["despike"], ranges)
+
+
+def _compute_hook(items, p, progress):
+    warm(items, p, progress)
+    if any(it.T is None for it in items):
+        return None
+    return compute(sorted(items, key=lambda it: (it.T, it.run_id)), p)
+
+
 def _drag(name, rid, axis, to_uA=lambda v: v):
     return Drag("fix", rid, axis=axis,
                 value=lambda v, old: steps.set_fix(old, name, round(to_uA(v), 2)),
@@ -184,12 +201,13 @@ def report(data):
 
 
 @analysis("1D", "轉折點追蹤 + I vs T（log dV/dI 台階）", group="進階", icon="◈", order=112,
-          modes=("current_bias",), item_defaults=defaults, store=LIN.STORE,
+          modes=("current_bias",), item_defaults=defaults, store=LIN.STORE, compute=_compute_hook,
+          progressive=True,
           params=LIN.EDGE_PARAMS + PARAMS + LIN.ITEM_PARAMS[:3] + [FIX] + LIN.ITEM_PARAMS[3:],
           help="和「線性化 dV/dI」共用 edge 與逐筆設定。紅點可拖曳修改，結果也會用在「Ic vs T 擬合」。")
 def step_transitions(fig, items, p):
     items = sorted(items, key=lambda it: (it.T is None, it.T or 0, it.run_id))
-    data = compute(items, p)
+    data = p.get("_data") or compute(items, p)
     view = p["view"]
     if view == VIEWS[0]:
         gs = fig.add_gridspec(1, 2, width_ratios=[1.55, 1], wspace=0.55)
