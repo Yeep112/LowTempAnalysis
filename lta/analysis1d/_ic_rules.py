@@ -58,4 +58,4 @@ def duplicate_note(items):
     if not dup:
         return ""
     return "⚠ 同一溫度選了多筆：" + "；".join(f"{T:g} K → run {', '.join(map(str, r))}" for T, r in sorted(dup.items())) + \
-        "（圖上會有重複的點；只想留一筆就在清單取消其他筆）"
+        "（圖上會有重複的點；按清單下方「⧉ 同溫度留一筆」即可）"

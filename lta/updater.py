@@ -25,8 +25,9 @@ import zipfile
 from .gui.launcher import TOOL_ROOT
 
 RELEASE_FILE = os.path.join(TOOL_ROOT, "release.json")
+INSTALLED_FILE = ".installed_commit"     # 目前安裝的是 GitHub 上哪一個 commit（沒改版本號的修改也能更新）
 # 不會被更新覆蓋的使用者檔案 / 資料夾（工具資料夾第一層）
-PRESERVE = {"settings.toml", "jobs", "_backup", "logs", ".git", "catalog.csv", "catalog.xlsx",
+PRESERVE = {INSTALLED_FILE, "settings.toml", "jobs", "_backup", "logs", ".git", "catalog.csv", "catalog.xlsx",
             ".catalog_cache.json", "__pycache__"}
 KEEP_BACKUPS = 3
 
@@ -58,6 +59,34 @@ def parse_version(v):
     return tuple(out)
 
 
+def push_history(rel):
+    """換版本號之前，把目前這一版的說明移到 history（最新的在前面）。"""
+    cur = {k: rel.get(k) for k in ("version", "date", "notes") if rel.get(k) is not None}
+    if not cur.get("version"):
+        return rel
+    hist = [h for h in rel.get("history", []) if h.get("version") != cur["version"]]
+    rel["history"] = ([cur] + hist)[:60]
+    return rel
+
+
+def all_notes(rel):
+    """[(版本, 日期, [說明…])]，最新的在前面。"""
+    out = [(rel.get("version", "?"), rel.get("date", ""), rel.get("notes", []))]
+    out += [(h.get("version", "?"), h.get("date", ""), h.get("notes", [])) for h in rel.get("history", [])
+            if h.get("version") != rel.get("version")]
+    return out
+
+
+def notes_since(remote, current):
+    """遠端 release.json 裡，比 current 新的每一版說明（同事跳過好幾版時一次列出）。"""
+    return [(v, d, n) for v, d, n in all_notes(remote or {}) if parse_version(v) > parse_version(current)]
+
+
+def disk_version(root=None):
+    """資料夾裡 release.json 現在寫的版本（覆蓋新檔案後可能和執行中的程式不同）。"""
+    return read_release(os.path.join(root or TOOL_ROOT, "release.json")).get("version", "0")
+
+
 def manifest_url(repo, branch="main"):
     return f"https://raw.githubusercontent.com/{repo}/{branch}/release.json"
 
@@ -66,8 +95,8 @@ def zip_url(repo, branch="main"):
     return f"https://github.com/{repo}/archive/refs/heads/{branch}.zip"
 
 
-def is_dev_folder(root=TOOL_ROOT):
-    return os.path.isdir(os.path.join(root, ".git"))
+def is_dev_folder(root=None):
+    return os.path.isdir(os.path.join(root or TOOL_ROOT, ".git"))
 
 
 def _get(url, timeout=10):
@@ -80,20 +109,65 @@ def _get(url, timeout=10):
 # ---------------------------------------------------------------------------
 # 檢查
 # ---------------------------------------------------------------------------
+def remote_commit(repo, branch="main", timeout=8):
+    """GitHub 上最新的 commit → (sha, 第一行說明)；讀不到回傳 (None, "")。"""
+    try:
+        req = urllib.request.Request(f"https://api.github.com/repos/{repo}/commits/{branch}",
+                                     headers={"User-Agent": "LowTempAnalysis-updater",
+                                              "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        return data.get("sha"), (data.get("commit", {}).get("message", "") or "").strip()
+    except Exception:
+        return None, ""
+
+
+def installed_commit(root=None):
+    root = root or TOOL_ROOT
+    try:
+        with open(os.path.join(root, INSTALLED_FILE), encoding="utf-8") as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def _write_installed(sha, root=None):
+    root = root or TOOL_ROOT
+    if sha and not is_dev_folder(root):
+        try:
+            with open(os.path.join(root, INSTALLED_FILE), "w", encoding="utf-8") as f:
+                f.write(sha)
+        except OSError:
+            pass
+
+
 def check(timeout=8, url=None):
     """回傳 {current, latest, newer, notes, repo, branch, remote}；沒設定儲存庫時 newer=False。"""
-    local = read_release()
+    local = read_release(os.path.join(TOOL_ROOT, "release.json"))
     repo, branch = local.get("repo", ""), local.get("branch", "main")
     info = {"current": local.get("version", "0"), "latest": None, "newer": False, "notes": [],
             "repo": repo, "branch": branch, "remote": None}
     if not repo and not url:
         info["error"] = "尚未設定 GitHub 儲存庫（release.json 的 repo）"
         return info
+    use_github = url is None
     url = url or manifest_url(repo, branch)
     remote = json.loads(_get(url + ("&" if "?" in url else "?") + f"t={int(time.time())}"
                              if url.startswith("http") else url, timeout).decode("utf-8"))
     info.update(latest=remote.get("version", "0"), notes=remote.get("notes", []), remote=remote,
                 newer=parse_version(remote.get("version", "0")) > parse_version(info["current"]))
+    info["since"] = notes_since(remote, info["current"])
+    # 版本號沒變、但 GitHub 上有新的修改（例如直接用 GitHub Desktop 推上去）→ 也算有更新
+    if not info["newer"] and use_github and not is_dev_folder():
+        sha, msg = remote_commit(repo, branch, timeout)
+        info["commit"], info["commit_msg"] = sha, msg
+        mine = installed_commit()
+        same_version = parse_version(info["latest"]) == parse_version(info["current"])
+        if sha and mine is None and same_version:
+            _write_installed(sha)                       # 第一次：當作目前就是 GitHub 上這一版
+        elif sha and mine and sha != mine and same_version:
+            info.update(newer=True, by_commit=True, latest=info["current"],
+                        notes=[l for l in msg.splitlines() if l.strip()][:8] or ["GitHub 上有新的修改"])
     return info
 
 
@@ -186,6 +260,9 @@ def apply_update(info=None, log=print, zip_source=None, root=TOOL_ROOT):
                 if fn.startswith("_") or not os.path.exists(dst):
                     shutil.copy2(os.path.join(new_jobs, fn), dst)
         write_release(new_rel, os.path.join(root, "release.json"))
+        sha = (info or {}).get("commit") or remote_commit(local.get("repo", ""), local.get("branch", "main"))[0] \
+            if local.get("repo") else None
+        _write_installed(sha, root)
         _prune_backups(os.path.join(root, "_backup"))
         log(f"完成：已更新到 v{new_ver}")
         return new_ver
@@ -238,6 +315,7 @@ def release(version=None, notes=None, repo=None, branch=None, push=False, log=pr
         rel["branch"] = branch
     rel.setdefault("branch", "main")
     if version:
+        push_history(rel)
         if parse_version(version) <= parse_version(rel.get("version", "0")):
             log(f"注意：新版本 {version} 沒有比目前的 {rel.get('version')} 大，使用者不會收到更新")
         rel["version"] = version.lstrip("vV")
@@ -307,7 +385,19 @@ def bump_patch(version):
 PERSONAL_FILES = ("settings.toml", "catalog.csv", "catalog.xlsx", ".catalog_cache.json")
 
 
-def publish(log=print, ask=input, root=None):
+def run_selftest(root, log=print, python=None):
+    """在工具資料夾跑 python -m lta selftest（獨立的行程，用的是資料夾裡的新程式）。回傳 True/False。"""
+    import sys as _sys
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", MPLBACKEND="Agg")
+    proc = subprocess.Popen([python or _sys.executable, "-m", "lta", "selftest"], cwd=root, env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                            errors="replace")
+    for line in proc.stdout:
+        log(line.rstrip())
+    return proc.wait() == 0
+
+
+def publish(log=print, ask=input, root=None, test=True):
     """把工具資料夾發佈到 GitHub：不用開 GitHub Desktop、不用打版本號。
 
     · 版本號用 release.json 的（我給你的更新檔已經改好）
@@ -358,11 +448,23 @@ def publish(log=print, ask=input, root=None):
         else:
             new = bump_patch(remote)
             note = (ask(f"\n版本號會改成 v{new}。這一版改了什麼？（直接 Enter = 小幅修正）：") or "").strip()
+            push_history(rel)
             rel["version"] = new
             rel["date"] = time.strftime("%Y-%m-%d")
             rel["notes"] = [note or "小幅修正"]
             write_release(rel, os.path.join(root, "release.json"))
             log(f"release.json → v{new}")
+
+    if test:
+        log("\n--- 上傳前自我測試（約 15–40 秒）---")
+        if not run_selftest(root, log):
+            ans = (ask("\n自我測試沒有通過，所以還沒上傳（避免把壞掉的版本推給同事）。\n"
+                       "確定要強制上傳請輸入 yes，直接 Enter = 取消：") or "").strip().lower()
+            if ans != "yes":
+                log("已取消，沒有上傳。把上面 ✗ 的錯誤訊息貼給 Claude 就可以修正。")
+                return False
+            log("強制上傳。")
+        log("")
 
     for f in PERSONAL_FILES:
         if run("ls-files", "--error-unmatch", f, check=False, quiet=True).returncode == 0:

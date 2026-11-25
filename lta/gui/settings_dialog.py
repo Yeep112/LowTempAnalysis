@@ -14,6 +14,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser
 
 from . import theme as T
+from .widgets import ScrollFrame
 from . import style as ST
 from .colors import THEME_PRESETS, DEFAULT_CYCLE, SWATCHES, parse_color, describe_base
 from .launcher import TOOL_ROOT, log_dir
@@ -407,16 +408,24 @@ class SettingsDialog:
 
     # ------------------------------------------------------------------ 更新
     def _tab_update(self, f):
-        from .. import updater, __version__
+        from .. import updater
         rel = updater.read_release()
+        running = getattr(self.app, "_running_version", rel.get("version", "?"))
+        disk = rel.get("version", "?")
         self._h(f, "版本", None)
-        tk.Label(f, text=f"目前版本　v{__version__}" + (f"（{rel.get('date')}）" if rel.get("date") else ""),
-                 bg=T.CARD, fg=T.TEXT, font=T.font(11)).pack(anchor="w")
+        tk.Label(f, text=f"目前版本　v{running}", bg=T.CARD, fg=T.TEXT, font=T.font(11)).pack(anchor="w")
+        if updater.parse_version(disk) != updater.parse_version(running):
+            row = tk.Frame(f, bg=T.CARD)
+            row.pack(fill="x", pady=(2, 2))
+            tk.Label(row, text=f"資料夾裡已經是 v{disk}（覆蓋了新檔案但軟體還沒重開）", bg=T.CARD, fg=T.WARNING,
+                     font=T.font(9, "bold")).pack(side="left")
+            ttk.Button(row, text="重新開啟以套用", style="Accent.TButton",
+                       command=lambda: (self.win.destroy(), self.app.restart())).pack(side="left", padx=8)
         repo = rel.get("repo") or "（尚未設定）"
         tk.Label(f, text=f"更新來源　github.com/{repo}　分支 {rel.get('branch', 'main')}", bg=T.CARD,
                  fg=T.MUTED).pack(anchor="w", pady=(2, 8))
         self.auto_upd = tk.BooleanVar(value=self.app.gui_settings.get("auto_update_check", True))
-        ttk.Checkbutton(f, text="開啟軟體時自動檢查更新", variable=self.auto_upd).pack(anchor="w")
+        ttk.Checkbutton(f, text="開啟軟體時與執行中（每 30 分鐘）自動檢查更新", variable=self.auto_upd).pack(anchor="w")
         row = tk.Frame(f, bg=T.CARD)
         row.pack(fill="x", pady=8)
         ttk.Button(row, text="立即檢查更新", style="Ghost.TButton",
@@ -424,19 +433,33 @@ class SettingsDialog:
         ttk.Button(row, text="還原上一版", style="Ghost.TButton", command=self._rollback).pack(side="left", padx=6)
         if updater.is_dev_folder():
             prow = tk.Frame(f, bg=T.CARD)
-            prow.pack(fill="x", pady=(6, 0))
+            prow.pack(fill="x", pady=(2, 4))
             ttk.Button(prow, text="⬆ 發佈到 GitHub", style="Accent.TButton",
                        command=lambda: self.app.spawn_console("publish", pause=True)).pack(side="left")
-            tk.Label(prow, text="這是你的開發資料夾（GitHub Desktop 複製的），不會被自動更新。\n"
-                     "按這裡（或雙擊 publish.bat）就會上傳目前版本，同事會收到更新提示。", bg=T.CARD,
-                     fg=T.MUTED, justify="left", font=T.font(9)).pack(side="left", padx=10)
-        self._h(f, "這一版的更新內容", None)
-        for n in rel.get("notes", []):
-            tk.Label(f, text="‧ " + n, bg=T.CARD, fg=T.TEXT, anchor="w", justify="left",
-                     wraplength=700).pack(fill="x")
-        tk.Label(f, text="\n更新時會先把目前的程式備份到工具資料夾的 _backup\\（保留最近 3 份）；"
-                 "settings.toml、jobs 裡的設定檔、資料總表都不會被覆蓋。", bg=T.CARD, fg=T.FAINT,
-                 font=T.font(9), wraplength=700, justify="left").pack(anchor="w")
+            tk.Label(prow, text="你的開發資料夾，不會被自動更新。按這裡（或雙擊 publish.bat）會先自我測試再上傳；\n"
+                     "直接用 GitHub Desktop 推上去，同事也一樣會收到更新。", bg=T.CARD, fg=T.MUTED,
+                     justify="left", font=T.font(9)).pack(side="left", padx=10)
+        self._h(f, "更新記錄", None)
+        box = ScrollFrame(f, bg=T.CARD)
+        box.pack(fill="both", expand=True)
+        body = box.body
+        body.columnconfigure(1, weight=1)
+        r = 0
+        for k, (v, d, notes) in enumerate(updater.all_notes(rel)):
+            cur = updater.parse_version(v) == updater.parse_version(running)
+            tag = "　← 目前" if cur else ""
+            tk.Label(body, text=f"v{v}" + (f"　{d}" if d else "") + tag, bg=T.CARD,
+                     fg=T.ACCENTS["1D"]["text"] if k == 0 else T.TEXT, font=T.font(10, "bold"),
+                     anchor="w").grid(row=r, column=0, columnspan=2, sticky="w", pady=(8 if k else 0, 2))
+            r += 1
+            for n in notes:
+                tk.Label(body, text="‧", bg=T.CARD, fg=T.MUTED).grid(row=r, column=0, sticky="nw", padx=(6, 4))
+                tk.Label(body, text=n, bg=T.CARD, fg=T.TEXT, anchor="w", justify="left",
+                         wraplength=640).grid(row=r, column=1, sticky="w")
+                r += 1
+        tk.Label(f, text="更新時會先把目前的程式備份到工具資料夾的 _backup\\（保留最近 3 份）；"
+                 "設定、jobs 裡的設定檔、資料總表都不會被覆蓋。", bg=T.CARD, fg=T.FAINT,
+                 font=T.font(9), wraplength=700, justify="left").pack(anchor="w", pady=(6, 0))
 
     def _rollback(self):
         from .. import updater

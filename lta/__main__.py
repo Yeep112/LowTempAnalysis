@@ -228,6 +228,11 @@ def cmd_release(a, settings):
     updater.release(version=a.version, notes=a.notes, repo=a.repo, branch=a.branch, push=a.push)
 
 
+def cmd_selftest(a, settings):
+    from . import selftest
+    sys.exit(0 if selftest.main(gui=not a.no_gui) else 1)
+
+
 def cmd_publish(a, settings):
     from . import updater
     print("=== 發佈到 GitHub ===\n")
@@ -432,6 +437,8 @@ def main(argv=None):
     s.add_argument("version", nargs="?"); s.add_argument("-n", "--notes", nargs="*", default=None)
     s.add_argument("--repo"); s.add_argument("--branch"); s.add_argument("--push", action="store_true")
     sub.add_parser("publish", help="一鍵發佈到 GitHub（開發者用）")
+    s = sub.add_parser("selftest", help="自我測試（publish 前會自動執行）")
+    s.add_argument("--no-gui", action="store_true")
     sub.add_parser("install")
     sub.add_parser("uninstall")
     sub.add_parser("shortcut")
@@ -443,7 +450,7 @@ def main(argv=None):
         p.print_help()
         return
     settings = load_settings()
-    if a.cmd not in ("release", "publish"):
+    if a.cmd not in ("release", "publish", "selftest"):
         try:
             import numpy  # noqa: F401   這個 Python 能用才記下來
             from .gui.launcher import register_paths
@@ -454,7 +461,8 @@ def main(argv=None):
      "run-all": cmd_run_all, "new": cmd_new, "types": cmd_types,
      "menu": cmd_menu, "open": cmd_open, "gui": cmd_gui, "app": cmd_gui, "shortcut": cmd_install,
      "install": cmd_install, "uninstall": cmd_uninstall, "diag": cmd_diag,
-     "update": cmd_update, "release": cmd_release, "publish": cmd_publish}[a.cmd](a, settings)
+     "update": cmd_update, "release": cmd_release, "publish": cmd_publish,
+     "selftest": cmd_selftest}[a.cmd](a, settings)
 
 
 if __name__ == "__main__":

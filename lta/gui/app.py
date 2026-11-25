@@ -255,7 +255,8 @@ class App:
         self.version_badge = tk.Label(sub, text=f"v{__version__}", bg=T.HEADER_2, fg=T.HEADER_MUTED,
                                       font=T.font(8, "bold"), padx=6, cursor="hand2")
         self.version_badge.pack(side="left", padx=(8, 0))
-        self.version_badge.bind("<Button-1>", lambda e: self.open_settings(tab="更新"))
+        self.version_badge.bind("<Button-1>", lambda e: self._badge_click())
+        self._running_version = __version__
 
         right = tk.Frame(h, bg=T.HEADER)
         right.pack(side="left", fill="x", expand=True, pady=12, padx=(0, 16))
@@ -345,6 +346,9 @@ class App:
         self.color_btn = ttk.Button(bf, text="● 顏色", style="Small.TButton",
                                     command=lambda: self._color_menu_at(self.color_btn))
         self.color_btn.pack(side="left")
+        self.dedup_btn = ttk.Button(bf, text="⧉ 同溫度留一筆", style="Small.TButton",
+                                    command=lambda: self._dedup_menu(self.dedup_btn))
+        self.dedup_btn.pack(side="left", padx=4)
         self.load_chip = Chip(bf, "")
         self.load_chip.pack(side="right")
 
@@ -1075,6 +1079,15 @@ class App:
     def _auto_update(self):
         if self._dead:
             return
+        try:
+            pending = self._restart_pending()
+            if pending != getattr(self, "_last_pending", None):
+                self._last_pending = pending
+                self._set_version_badge(self._update_info["latest"] if self._update_info else None)
+                if pending:
+                    self.status(f"資料夾裡已經是 v{pending}，重新開啟軟體就會套用（點左上角版本標籤）", "warn")
+        except Exception:
+            pass
         try:
             if self.auto_var.get() and self.db and os.path.exists(self.db.path):
                 m = db_mtime(self.db.path)
@@ -1871,6 +1884,55 @@ class App:
         finally:
             menu.grab_release()
 
+    # ---------------------------------------------------------------- 同溫度留一筆
+    DEDUP_RULES = [("保留 run 號最小的（最早量的）", "first"), ("保留 run 號最大的（最新的）", "last"),
+                   ("保留點數最多的", "most")]
+
+    def _dedup_menu(self, widget):
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label="選取的資料裡，同一個溫度、同一組接點只保留一筆：", state="disabled")
+        last = self.gui_settings.get("dedup_rule", "first")
+        for label, rule in self.DEDUP_RULES:
+            m.add_command(label=("✓ " if rule == last else "　") + label, command=lambda r=rule: self.dedup_selection(r))
+        try:
+            m.tk_popup(widget.winfo_rootx(), widget.winfo_rooty() + widget.winfo_height())
+        finally:
+            try:
+                m.grab_release()
+            except Exception:
+                pass
+
+    def dedup_selection(self, rule="first"):
+        """同一溫度（且同接點、同量測種類、同掃描方向）選到多筆時，只留一筆。"""
+        infos = self._selected_infos()
+        groups = {}
+        for r in infos:
+            if r.T_K is None:
+                continue
+            key = (round(r.T_K, 4), r.contacts, r.kind, r.mode, r.sweep, r.is_2d)
+            groups.setdefault(key, []).append(r)
+        drop = []
+        for key, rs in groups.items():
+            if len(rs) < 2:
+                continue
+            if rule == "last":
+                keep = max(rs, key=lambda r: r.run_id)
+            elif rule == "most":
+                keep = max(rs, key=lambda r: (r.n_points, -r.run_id))
+            else:
+                keep = min(rs, key=lambda r: r.run_id)
+            drop += [r for r in rs if r is not keep]
+        self.gui_settings["dedup_rule"] = rule
+        ST.save_settings(self.gui_settings)
+        if not drop:
+            self.status("選取的資料裡沒有同溫度重複的", "info")
+            return []
+        self.tree.selection_remove([str(r.run_id) for r in drop])
+        self._on_select()
+        msg = "已取消選取：" + "、".join(f"run {r.run_id}（{fmt_T(r.T_K)}）" for r in sorted(drop, key=lambda r: r.run_id))
+        self.status(msg, "ok")
+        return [r.run_id for r in drop]
+
     def _tree_motion(self, event):
         """滑鼠移到「色」欄的圓點：說明這筆有自訂顏色、怎麼清除。"""
         try:
@@ -2093,24 +2155,54 @@ class App:
         if not info["newer"]:
             self._set_version_badge(None)
             if manual:
-                messagebox.showinfo("檢查更新", f"目前已是最新版本（v{info['current']}）", parent=self.root)
+                if self._restart_pending():
+                    if messagebox.askyesno("檢查更新", f"資料夾裡已經是最新的 v{info['current']}，"
+                                           f"但目前執行的還是 v{self._running_version}。\n\n現在重新開啟套用嗎？",
+                                           parent=self.root):
+                        self.restart()
+                else:
+                    messagebox.showinfo("檢查更新", f"目前已是最新版本（v{info['current']}）", parent=self.root)
             return
         self._update_info = info
         self._set_version_badge(info["latest"])
         self.update_btn.configure(text=f"⬆ 更新到 v{info['latest']}")
         self.update_btn.pack(side="left", padx=(10, 0))
         self.status(f"有新版本 v{info['latest']}（目前 v{info['current']}），點右上角按鈕更新", "warn")
-        if manual or (info["latest"] != self._prompted_version
-                      and info["latest"] != self.gui_settings.get("skip_version")):
-            self._prompted_version = info["latest"]
+        key = info.get("commit") if info.get("by_commit") else info["latest"]
+        if manual or (key != self._prompted_version and key != self.gui_settings.get("skip_version")):
+            self._prompted_version = key
             self._prompt_update(info)
+
+    def _badge_click(self):
+        disk = self._restart_pending()
+        if disk and messagebox.askyesno("重新開啟", f"資料夾裡已經是 v{disk}，目前執行的是 v{self._running_version}。\n"
+                                        "現在重新開啟以套用新版嗎？", parent=self.root):
+            self.restart()
+            return
+        self.open_settings(tab="更新")
+
+    def _restart_pending(self):
+        """資料夾裡的檔案已經是新版（例如手動覆蓋），但執行中的還是舊程式。"""
+        try:
+            from .. import updater
+            disk = updater.disk_version()
+            return updater.parse_version(disk) != updater.parse_version(self._running_version) and disk
+        except Exception:
+            return None
 
     def _set_version_badge(self, latest):
         from .. import __version__
         try:
+            disk = self._restart_pending()
+            if disk:
+                a = T.ACCENTS[self.category]
+                self.version_badge.configure(text=f"v{self._running_version} → 重新開啟以套用 v{disk}",
+                                             bg=T.WARNING, fg="white")
+                return
             if latest:
                 a = T.ACCENTS[self.category]
-                self.version_badge.configure(text=f"v{__version__} → v{latest} 可更新", bg=a["main"],
+                label = "有新的修改可更新" if (self._update_info or {}).get("by_commit") else f"v{latest} 可更新"
+                self.version_badge.configure(text=f"v{__version__} → {label}", bg=a["main"],
                                              fg=a.get("on", "white"))
             else:
                 self.version_badge.configure(text=f"v{__version__}", bg=T.HEADER_2, fg=T.HEADER_MUTED)
@@ -2120,16 +2212,23 @@ class App:
     def _prompt_update(self, info):
         if not info:
             return
-        notes = "\n".join("‧ " + n for n in info.get("notes", [])) or "（沒有說明）"
+        if info.get("by_commit"):
+            head = f"GitHub 上有新的修改（版本號仍是 v{info['current']}）"
+            notes = "\n".join("‧ " + n for n in info.get("notes", [])) or "（沒有說明）"
+        else:
+            head = f"有新版本 v{info['latest']}（目前 v{info['current']}）"
+            blocks = []
+            for v, d, ns in (info.get("since") or [(info["latest"], "", info.get("notes", []))])[:6]:
+                blocks.append(f"v{v}" + (f"（{d}）" if d else "") + "\n" + "\n".join("‧ " + n for n in ns))
+            notes = "\n\n".join(blocks) or "（沒有說明）"
         ans = messagebox.askyesnocancel(
-            "有新版本",
-            f"有新版本 v{info['latest']}（目前 v{info['current']}）\n\n更新內容：\n{notes}\n\n"
+            "有新版本", f"{head}\n\n更新內容：\n{notes}\n\n"
             "是 = 立即更新並重新開啟\n否 = 稍後再說\n取消 = 略過這個版本",
             parent=self.root)
         if ans is True:
             self.do_update(info)
         elif ans is None:
-            self.gui_settings["skip_version"] = info["latest"]
+            self.gui_settings["skip_version"] = info.get("commit") if info.get("by_commit") else info["latest"]
             ST.save_settings(self.gui_settings)
             self.update_btn.pack_forget()
 
