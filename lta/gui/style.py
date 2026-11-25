@@ -5,7 +5,9 @@ import json
 import os
 
 DEFAULT_STYLE = dict(grid=True, xlabel=12, ylabel=12, cbar=12, ticks=10, legend=8, title=11,
-                     layout="左右並排（可捲動）", panel_w=520, panel_h=380)
+                     layout="左右並排（可捲動）", panel_w=520, panel_h=380,
+                     size_mode="填滿視窗", fig_w=1400, fig_h=800)
+SIZE_MODES = ["填滿視窗", "固定大小"]
 LAYOUTS = ["左右並排（可捲動）", "上下排列（可捲動）", "縮放填滿視窗"]
 
 # 介面上的欄位：(key, 標籤)

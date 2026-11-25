@@ -53,6 +53,16 @@ def setup_environment():
             sys.stdout = sys.stderr = f
         except OSError:
             pass
+    try:
+        # 程式整個閃退（不是一般錯誤）時，把當時每個執行緒在做什麼寫進 crash.log，方便找原因
+        import faulthandler
+        global _CRASH_LOG
+        _CRASH_LOG = open(os.path.join(log_dir(), "crash.log"), "a", encoding="utf-8")
+        _CRASH_LOG.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} 啟動\n")
+        _CRASH_LOG.flush()
+        faulthandler.enable(file=_CRASH_LOG, all_threads=True)
+    except Exception:
+        pass
     if os.name == "nt":
         prefix = sys.prefix
         extra = [prefix, os.path.join(prefix, "Library", "mingw-w64", "bin"),
@@ -216,8 +226,73 @@ def main(db_path=None):
         pass
     root.focus_force()
     root.report_callback_exception = _report_callback(root)
+    root.after(400, lambda: set_taskbar_relaunch(root))
     root.mainloop()
     return 0
+
+
+def set_taskbar_relaunch(root):
+    """讓工作列上「釘選」的圖示能直接啟動本軟體。
+
+    Windows 預設會把 pythonw.exe（沒有參數）釘選上去，點了什麼都不會發生；
+    這裡在視窗上寫入 AppUserModel 的 RelaunchCommand → 釘選後執行 LowTempAnalysis.pyw。"""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        import uuid
+        from ctypes import wintypes
+        from ..install import pythonw_path
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort), ("Data3", ctypes.c_ushort),
+                        ("Data4", ctypes.c_ubyte * 8)]
+
+        def guid(text):
+            u = uuid.UUID(text)
+            g = GUID(u.time_low, u.time_mid, u.time_hi_version)
+            for i, b in enumerate(u.bytes[8:]):
+                g.Data4[i] = b
+            return g
+
+        class PROPERTYKEY(ctypes.Structure):
+            _fields_ = [("fmtid", GUID), ("pid", ctypes.c_ulong)]
+
+        class PROPVARIANT(ctypes.Structure):
+            _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
+                        ("r3", ctypes.c_ushort), ("pwszVal", ctypes.c_wchar_p), ("pad", ctypes.c_void_p)]
+
+        hwnd = int(root.wm_frame(), 16) or ctypes.windll.user32.GetParent(root.winfo_id())
+        store = ctypes.c_void_p()
+        iid = guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99")              # IID_IPropertyStore
+        hr = ctypes.windll.shell32.SHGetPropertyStoreForWindow(wintypes.HWND(hwnd), ctypes.byref(iid),
+                                                               ctypes.byref(store))
+        if hr != 0 or not store:
+            return False
+        vtbl = ctypes.cast(store, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        set_value = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(PROPERTYKEY),
+                                       ctypes.POINTER(PROPVARIANT))(vtbl[6])
+        commit = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtbl[7])
+        release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])
+        fmt = guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3")              # PKEY_AppUserModel_*
+        pyw = os.path.join(TOOL_ROOT, "LowTempAnalysis.pyw")
+        values = [(2, f'"{pythonw_path()}" "{pyw}"'),                    # RelaunchCommand
+                  (4, APP_NAME),                                          # RelaunchDisplayNameResource
+                  (3, os.path.join(ASSETS, "icon.ico")),                  # RelaunchIconResource
+                  (5, APP_ID)]                                            # ID
+        keep = []
+        for pid, text in values:
+            key, var = PROPERTYKEY(fmt, pid), PROPVARIANT()
+            var.vt = 31                                                   # VT_LPWSTR
+            var.pwszVal = text
+            keep.append((key, var))
+            set_value(store, ctypes.byref(key), ctypes.byref(var))
+        commit(store)
+        release(store)
+        return True
+    except Exception as e:
+        print(f"設定工作列釘選失敗：{e}", file=sys.stderr)
+        return False
 
 
 def _report_callback(root):

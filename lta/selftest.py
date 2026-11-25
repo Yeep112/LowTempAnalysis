@@ -322,6 +322,9 @@ def main(gui=True, log=print):
         log(f"自我測試 v{__version__}（{TOOL_ROOT}）")
         rep.check("程式檔語法", lambda: None if compileall.compile_dir(
             os.path.join(TOOL_ROOT, "lta"), quiet=1, force=False) else (_ for _ in ()).throw(SyntaxError("有語法錯誤，見上方")))
+        pyw = os.path.join(TOOL_ROOT, "LowTempAnalysis.pyw")
+        if os.path.exists(pyw):
+            rep.check("啟動檔 LowTempAnalysis.pyw", lambda: compile(open(pyw, encoding="utf-8").read(), pyw, "exec") and None)
 
         def imports():
             import importlib

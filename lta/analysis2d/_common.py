@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import time
+
 import numpy as np
 from matplotlib import colormaps
 
@@ -135,7 +137,7 @@ def add_map(fig, ax, X, Y, Z, cmap, vlim, zlabel):
     return mesh
 
 
-CUT_HINT = "左鍵點色圖加切線 · 右鍵清除"
+CUT_HINT = "左鍵點色圖加切線（右邊畫 IV）· 在切線上按住可拖曳到別的位置 · 右鍵清除"
 
 
 def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_line=False,
@@ -189,14 +191,104 @@ def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_li
     if first_cut:
         add_cut(0.0 if origin_line else X_axis[len(X_axis) // 2])
 
-    def on_click(event):
-        if event.inaxes is not ax or event.xdata is None:
+    def refresh_legend():
+        ax_cut.relim()
+        ax_cut.autoscale_view()
+        ax_cut.legend(fontsize=7, title=f"{cut_title} @ {xl}", title_fontsize=7)
+
+    def mark_near(event, tol=7):
+        """滑鼠附近（像素）的切線標記序號。"""
+        best, k_best = tol, None
+        for k, mk in enumerate(state["marks"]):
+            xd = mk.get_xdata()[0]
+            px_, _ = ax.transData.transform((xd, 0))
+            if abs(px_ - event.x) <= best:
+                best, k_best = abs(px_ - event.x), k
+        return k_best
+
+    def move_cut(k, x):
+        i = int(np.argmin(np.abs(X_axis - x)))
+        state["marks"][k].set_xdata([X_axis[i], X_axis[i]])
+        ln = state["lines"][k]
+        ln.set_data(Y[i], Z[i])
+        ln.set_label(f"{X_axis[i]:+.4g}")
+
+    def blit(canvas, k):
+        d = state.get("drag")
+        if d is None or d.get("bg") is None:
+            canvas.draw_idle()
             return
-        if event.button == 1:
-            add_cut(event.xdata)
-        elif event.button == 3:
-            clear()
-        event.canvas.draw_idle()
-    return on_click
+        try:
+            canvas.restore_region(d["bg"])
+            ax.draw_artist(state["marks"][k])
+            ax_cut.draw_artist(state["lines"][k])
+            canvas.blit(canvas.figure.bbox)
+        except Exception:
+            d["bg"] = None
+            canvas.draw_idle()
+
+    def on_mouse(event):
+        """左鍵點一下：在那個位置加切線（右邊畫 IV）；在切線上按住（或按住拖曳）：把那條切線移到別的位置；
+        右鍵：清除。"""
+        canvas = event.canvas
+        name = event.name
+        if name == "button_press_event":
+            if event.inaxes is not ax or event.xdata is None:
+                return
+            if event.button == 3:
+                clear()
+                canvas.draw_idle()
+                return
+            if event.button != 1:
+                return
+            k = mark_near(event)
+            state["press"] = dict(x=event.x, y=event.y, t=time.time(), xdata=event.xdata, k=k)
+            state["drag"] = None
+            return
+        press = state.get("press")
+        if press is None:
+            return
+        if name == "motion_notify_event":
+            if press["k"] is None:
+                return
+            d = state.get("drag")
+            if d is None:
+                held = time.time() - press["t"] >= 0.25
+                moved = abs(event.x - press["x"]) > 6
+                if not (held or moved):
+                    return
+                k = press["k"]
+                d = state["drag"] = dict(k=k, bg=None)
+                for art in (state["marks"][k], state["lines"][k]):
+                    art.set_animated(True)
+                try:
+                    canvas.draw()
+                    d["bg"] = canvas.copy_from_bbox(canvas.figure.bbox)
+                except Exception:
+                    d["bg"] = None
+            x = event.xdata if event.inaxes is ax else None
+            if x is None:
+                inv = ax.transData.inverted()
+                x = inv.transform((event.x, event.y))[0]
+                x = min(max(x, X_axis.min()), X_axis.max())
+            move_cut(d["k"], x)
+            blit(canvas, d["k"])
+            return
+        if name == "button_release_event":
+            state["press"] = None
+            d, state["drag"] = state.get("drag"), None
+            if d is not None:                      # 拖曳結束
+                for art in (state["marks"][d["k"]], state["lines"][d["k"]]):
+                    art.set_animated(False)
+                refresh_legend()
+                canvas.draw_idle()
+                return
+            if abs(event.x - press["x"]) <= 6 and abs(event.y - press["y"]) <= 6:   # 點一下 → 加切線
+                add_cut(press["xdata"])
+                canvas.draw_idle()
+
+    on_mouse.full_events = True        # 介面會把按下、移動、放開都交給它
+    on_mouse.drag_ax = ax
+    return on_mouse
 
 

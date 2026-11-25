@@ -14,6 +14,7 @@ import csv
 import os
 import queue
 import re
+import sqlite3
 import threading
 import time
 import traceback
@@ -99,6 +100,7 @@ class App:
         self.param_vars = {}            # 設定群組 -> {參數 -> tk 變數}
         self.saved_params = {}          # 設定群組 -> {參數 -> 文字}（和預設不同的值，存在樣品資料夾）
         self.labels = {}                # 分析名稱 -> {"suptitle": 文字, "axes": {序號: {title/xlabel/ylabel}}}
+        self._view = {}                 # 上次的畫面：分類、功能、選取的 run（依資料庫）
         self._param_defs = {}           # (群組, 參數) -> P
         self._text_boxes = {}           # (群組, 參數) -> 多行文字框
         self._save_job = None
@@ -410,12 +412,17 @@ class App:
         self.tree = ttk.Treeview(tf, columns=cols, show="headings", selectmode="extended")
         for c, hd, w in zip(cols, heads, widths):
             self.tree.heading(c, text=hd, command=lambda c=c: self._sort_by(c))
-            self.tree.column(c, width=w, minwidth=T.px(22 if c == "c" else 40), stretch=(c == "name"),
+            self.tree.column(c, width=w if c != "name" else T.px(420), minwidth=T.px(22 if c == "c" else 40),
+                             stretch=False,
                              anchor="center" if c == "c" else ("w" if c in ("name", "mode", "time") else "e"))
         sb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=sb.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(tf, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=sb.set, xscrollcommand=hsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        sb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")          # 描述太長時可以左右捲動
+        tf.rowconfigure(0, weight=1)
+        tf.columnconfigure(0, weight=1)
         self.tree.tag_configure("odd", background=T.STRIPE)
         for m, col in T.MODE_COLORS.items():
             self.tree.tag_configure(f"m_{m}", foreground=col)
@@ -881,8 +888,27 @@ class App:
         for ax, sp in zip(prim, specs):
             ax.set_subplotspec(new[sp.colspan.start:sp.colspan.stop, 0])
 
+    def _fixed_size(self):
+        return self.plot_style.get("size_mode") == ST.SIZE_MODES[1]
+
+    def _freeze_size(self):
+        """把目前看到的圖的大小設成固定大小（之後改視窗、分隔線都不會變）。"""
+        try:
+            w = int(self.canvas.get_tk_widget().winfo_width() / T.PX)
+            h = int(self.canvas.get_tk_widget().winfo_height() / T.PX)
+        except Exception:
+            return
+        if w < 100 or h < 100:
+            return
+        self.style_vars["fig_w"].set(str(w))
+        self.style_vars["fig_h"].set(str(h))
+        self.style_vars["size_mode"].set(ST.SIZE_MODES[1])
+        self.status(f"圖的大小固定為 {w} × {h} px（存圖也是這個大小）", "ok")
+
     def _panel_need(self):
-        """這張圖需要的最小像素大小 (寬, 高)；0 = 跟視窗一樣大。"""
+        """這張圖需要的最小像素大小 (寬, 高)；0 = 跟視窗一樣大。固定大小時就是設定的大小。"""
+        if self._fixed_size():
+            return (int(self.plot_style.get("fig_w", 1400) * T.PX), int(self.plot_style.get("fig_h", 800) * T.PX))
         if self.plot_style.get("layout") == ST.LAYOUTS[2]:
             return (0, 0)
         prim = self._primary_axes()
@@ -895,6 +921,13 @@ class App:
         pw = int(int(self.plot_style.get("panel_w", 520)) * T.PX)       # 設定值以 100% 大小為準
         ph = int(int(self.plot_style.get("panel_h", 380)) * T.PX)
         return (cols * pw if cols > 1 else 0, rows * ph if rows > 1 else 0)
+
+    def _after_resize_redraw(self):
+        """大小改變後（等畫布調整完）重新排版重畫。"""
+        try:
+            self._fit_view(limits={})          # 保留目前的縮放範圍
+        except Exception:
+            pass
 
     def _schedule_layout(self):
         """拉動視窗時合併成一次排版（等停下來 0.08 秒）。"""
@@ -915,7 +948,10 @@ class App:
         if aw < 20 or ah < 20:
             return
         nw, nh = self._plot_need
-        W, H = max(aw, nw), max(ah, nh)
+        if self._fixed_size() and nw and nh:
+            W, H = nw, nh                       # 固定大小：不拉伸、不壓縮，放不下就捲動
+        else:
+            W, H = max(aw, nw), max(ah, nh)
         self.plot_host.itemconfigure(self._plot_win, width=W, height=H)
         self.plot_host.configure(scrollregion=(0, 0, W, H))
         for sb, need, kw in ((self._hscroll, W > aw, dict(row=1, column=0, sticky="ew")),
@@ -989,13 +1025,19 @@ class App:
         self.style_vars["layout"] = tk.StringVar(value=self.plot_style.get("layout", ST.LAYOUTS[0]))
         ttk.Combobox(bar2, textvariable=self.style_vars["layout"], values=ST.LAYOUTS, state="readonly",
                      width=18, font=T.font(9)).pack(side="left", pady=3)
-        for key, label in (("panel_w", "每張最小寬"), ("panel_h", "最小高")):
-            tk.Label(bar2, text=label, bg=T.SUBTLE, fg=T.MUTED, font=T.font(9)).pack(side="left", padx=(10, 3))
+        tk.Label(bar2, text="圖的大小", bg=T.SUBTLE, fg=T.MUTED, font=T.font(9, "bold")).pack(side="left", padx=(14, 6))
+        self.style_vars["size_mode"] = tk.StringVar(value=self.plot_style.get("size_mode", ST.SIZE_MODES[0]))
+        ttk.Combobox(bar2, textvariable=self.style_vars["size_mode"], values=ST.SIZE_MODES, state="readonly",
+                     width=9, font=T.font(9)).pack(side="left", pady=3)
+        for key, label in (("fig_w", "寬"), ("fig_h", "高")):
+            tk.Label(bar2, text=label, bg=T.SUBTLE, fg=T.MUTED, font=T.font(9)).pack(side="left", padx=(8, 3))
             var = tk.StringVar(value=str(int(self.plot_style.get(key, ST.DEFAULT_STYLE[key]))))
             self.style_vars[key] = var
-            ttk.Spinbox(bar2, from_=200, to=2000, increment=20, width=5, textvariable=var,
+            ttk.Spinbox(bar2, from_=300, to=6000, increment=50, width=5, textvariable=var,
                         command=self._schedule_restyle).pack(side="left")
         tk.Label(bar2, text="px", bg=T.SUBTLE, fg=T.FAINT, font=T.font(8)).pack(side="left", padx=(2, 0))
+        ttk.Button(bar2, text="用目前大小", style="Small.TButton",
+                   command=self._freeze_size).pack(side="left", padx=(8, 0), pady=2)
         ttk.Button(bar2, text="✎ 標題與軸標籤", style="Small.TButton",
                    command=self.edit_labels).pack(side="right", padx=6, pady=2)
         for var in self.style_vars.values():
@@ -1003,9 +1045,12 @@ class App:
 
     def _read_style(self):
         st = {"grid": bool(self.style_vars["grid"].get()), "layout": self.style_vars["layout"].get()}
+        st["size_mode"] = self.style_vars["size_mode"].get()
         for key in ("panel_w", "panel_h"):
+            st[key] = self.plot_style.get(key, ST.DEFAULT_STYLE[key])
+        for key in ("fig_w", "fig_h"):
             try:
-                st[key] = int(max(200, min(3000, float(self.style_vars[key].get()))))
+                st[key] = int(max(300, min(6000, float(self.style_vars[key].get()))))
             except (TypeError, ValueError):
                 st[key] = self.plot_style.get(key, ST.DEFAULT_STYLE[key])
         for key, _ in ST.FIELDS:
@@ -1031,6 +1076,11 @@ class App:
         if self.result is not None:
             if old.get("layout") != self.plot_style["layout"]:
                 self._schedule_plot(delay=10)          # 排列方式改了要重新排版
+                return
+            if any(old.get(k) != self.plot_style.get(k) for k in ("size_mode", "fig_w", "fig_h")):
+                self._plot_need = self._panel_need()
+                self._layout_plot()
+                self.root.after(220, self._after_resize_redraw)
                 return
             ST.apply_style(self.fig, self.plot_style)
             self._plot_need = self._panel_need()
@@ -1100,15 +1150,56 @@ class App:
         if path:
             self.open_db(path)
 
-    def open_db(self, path, cache=None):
+    def open_db(self, path, cache=None, sync=False):
+        """開啟資料庫：讀 run 清單在背景執行（大檔、雲端同步資料夾也不會卡住畫面）。"""
         if not path:
             return
-        try:
-            db = QDB(path)
-            runs = db.runs()
-        except Exception as e:
-            messagebox.showerror("無法開啟", f"{path}\n\n{e}")
+        self._open_gen = getattr(self, "_open_gen", 0) + 1
+        og = self._open_gen
+        if sync or cache is not None:
+            try:
+                db = QDB(path)
+                runs = db.runs()
+            except Exception as e:
+                self._open_failed(path, e)
+                return
+            self._finish_open(db, runs, cache)
             return
+        self.status(f"正在讀取 {os.path.basename(path)}…", "busy")
+        self._set_busy((0, 0, f"讀取 {os.path.basename(path)}"))
+        self.root.config(cursor="watch")
+
+        def work():
+            for attempt in range(3):                 # 同步中的檔案可能暫時被鎖住 → 稍等再試
+                try:
+                    db = QDB(path)
+                    runs = db.runs()
+                    self._queue.put(("opened", (og, db, runs)))
+                    return
+                except sqlite3.OperationalError as e:
+                    err = e
+                    time.sleep(0.8)
+                except Exception as e:
+                    err = e
+                    break
+            self._queue.put(("open_failed", (og, path, err)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _open_failed(self, path, e):
+        self.root.config(cursor="")
+        self._set_busy(None)
+        hint = ""
+        if isinstance(e, sqlite3.OperationalError):
+            hint = "\n\n檔案可能正在被量測程式寫入或雲端同步中，請稍後按「重新整理」再試。"
+        messagebox.showerror("無法開啟", f"{path}\n\n{e}{hint}", parent=self.root)
+        self.status(f"無法開啟：{e}", "error")
+
+    def _finish_open(self, db, runs, cache=None):
+        self.root.config(cursor="")
+        self._set_busy(None)
+        if self.db is not None and self._save_job is not None:      # 換資料庫前先把舊的存好
+            self.root.after_cancel(self._save_job)
+            self._save_per_run()
         self._gen += 1
         self.db, self.cache, self.all_runs = db, (cache if cache is not None else {}), runs
         self._mtime = db_mtime(db.path)
@@ -1126,6 +1217,8 @@ class App:
         n2 = sum(r.is_2d for r in runs)
         self.status(f"已開啟 {db.name}：{len(runs)} 筆（1D {len(runs) - n2}、2D {n2}），背景載入中…", "busy")
         self._welcome()
+        if cache is None and self.gui_settings.get("restore_view", True):
+            self._restore_view()
 
     def _preload(self):
         """一次把所有 run 讀進記憶體（背景執行）。"""
@@ -1200,6 +1293,17 @@ class App:
                         self.open_db(dbs[0])
                     elif not dbs:
                         self.status("data_root 底下沒有找到 .db，請用「開啟檔案」", "warn")
+                elif kind == "opened":
+                    og, db, runs = data
+                    if og == getattr(self, "_open_gen", 0):
+                        self._finish_open(db, runs)
+                elif kind == "open_failed":
+                    og, path, err = data
+                    if og == getattr(self, "_open_gen", 0):
+                        self._open_failed(path, err)
+                elif kind == "ready_for_plot":
+                    if data == self._compute_gen and not self._dead:
+                        self.plot()
                 elif kind == "loaded":
                     gen, k, n = data
                     if gen == self._gen:
@@ -1210,6 +1314,10 @@ class App:
                             self.status(self.status_var.get().replace("背景載入中…", "全部載入完成"), "ok")
                 elif kind == "status":
                     self.status(*data)
+                elif kind == "progress_load":
+                    gen, k, n = data
+                    if gen == self._compute_gen:
+                        self._set_busy((k, n, "讀取資料"))
                 elif kind == "progress":
                     self._on_progress(*data)
                 elif kind == "computed":
@@ -1295,6 +1403,8 @@ class App:
     def _on_select(self, event=None):
         if self._suspend:
             return
+        self._view.setdefault("sel", {})[self.category] = [int(i) for i in self.tree.selection()]
+        self._schedule_view_save()
         self._update_count()
         self._update_feature_compat()
         self._refresh_item_table()
@@ -1320,6 +1430,56 @@ class App:
             self._fill_tree()
         self._load_feature_list()
         self._welcome()
+        self._view["category"] = cat
+        self._schedule_view_save()
+        self._restore_selection(cat)
+
+    # ================================================================== 記住每個資料庫上次的畫面
+    def _schedule_view_save(self):
+        if getattr(self, "_loading_view", False) or not self.db:
+            return
+        if self._save_job is not None:
+            self.root.after_cancel(self._save_job)
+        self._save_job = self.root.after(1200, self._save_per_run)
+
+    def _restore_selection(self, cat):
+        ids = [str(r) for r in (self._view.get("sel") or {}).get(cat, []) if self.tree.exists(str(r))]
+        if ids:
+            self.tree.selection_set(ids)
+            self.tree.see(ids[0])
+            self._on_select()
+
+    def _restore_view(self):
+        """開啟資料庫後回到上次的分類、功能、篩選與選取的 run。"""
+        v = self._view
+        if not v:
+            return
+        self._loading_view = True
+        try:
+            for c, name in (v.get("current") or {}).items():
+                a = next((x for x in self.analyses.get(c, []) if x.name == name), None)
+                if a:
+                    self.current[c] = a
+            for c, text in (v.get("filters") or {}).items():
+                self._filters[c] = text
+            cat = v.get("category", self.category)
+            if cat != self.category and cat in self.analyses:
+                self.segment.select(0 if cat == "1D" else 1, notify=False)
+                self._suspend = True
+                self.category = cat
+                self._apply_accent()
+                self._suspend = False
+            self._load_feature_list()
+            if self.filter_var.get() != self._filters.get(self.category, ""):
+                self.filter_var.set(self._filters.get(self.category, ""))
+            else:
+                self._fill_tree()
+        finally:
+            self._loading_view = False
+        self._restore_selection(self.category)
+        n = len((v.get("sel") or {}).get(self.category, []))
+        if n:
+            self.status(f"已回到上次的畫面：{self.current[self.category].name}，{n} 筆", "ok")
 
     # ================================================================== 功能與參數
     def _load_feature_list(self):
@@ -1331,6 +1491,8 @@ class App:
 
     def _on_feature(self, name):
         self.current[self.category] = next(a for a in self.analyses[self.category] if a.name == name)
+        self._view.setdefault("current", {})[self.category] = name
+        self._schedule_view_save()
         self._build_params()
         self._schedule_plot()
 
@@ -1461,6 +1623,7 @@ class App:
         self.run_colors = {}
         self.saved_params = {}
         self.labels = {}
+        self._view = {}
         path = self._per_run_path()
         try:
             with open(path, encoding="utf-8") as f:
@@ -1468,6 +1631,7 @@ class App:
             self.run_colors = {int(r): v for r, v in data.pop("__colors__", {}).items()}
             self.saved_params = {st: dict(v) for st, v in data.pop("__params__", {}).items()}
             self.labels = data.pop("__labels__", {})
+            self._view = data.pop("__view__", {})
             self.per_run = {an: {k: {int(r): v for r, v in vals.items()} for k, vals in keys.items()}
                             for an, keys in data.items()}
         except (OSError, ValueError, TypeError, AttributeError):
@@ -1497,6 +1661,8 @@ class App:
                       if v.get("suptitle") or v.get("axes") or v.get("legend") or any((v.get("hidden") or {}).values())}
             if labels:
                 allc[self.db.name]["__labels__"] = labels
+            self._view["filters"] = dict(self._filters, **{self.category: self.filter_var.get()})
+            allc[self.db.name]["__view__"] = self._view
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(allc, f, ensure_ascii=False, indent=1)
         except OSError as e:
@@ -1627,13 +1793,19 @@ class App:
         self.item_hint = tk.Label(self.param_frame, text="", bg=acc["main"], fg=acc.get("on", "white"),
                                   font=T.font(9, "bold"), anchor="w", padx=8, pady=3)
         tr.grid(row=row + 2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        if len(a.per_item_params) > 3:                 # 欄位多時可以左右捲動
+            xsb = ttk.Scrollbar(self.param_frame, orient="horizontal", command=tr.xview)
+            tr.configure(xscrollcommand=xsb.set)
+            xsb.grid(row=row + 3, column=0, columnspan=2, sticky="ew")
+            for q in a.per_item_params:
+                tr.column(q.key, stretch=False)
         self._item_hint_row = row + 4
         tr.bind("<Double-1>", self._edit_item_cell)
         tr.bind("<<TreeviewSelect>>", lambda e: self._on_item_row_select())
         tips = [f"{q.label}：{q.tip}" for q in a.per_item_params if q.tip]
         if tips:
             tk.Label(self.param_frame, text="↳ " + "　".join(tips), bg=T.CARD, fg=T.FAINT, font=T.font(8),
-                     wraplength=T.px(410), justify="left", anchor="w").grid(row=row + 3, column=0, columnspan=2, sticky="w")
+                     wraplength=T.px(410), justify="left", anchor="w").grid(row=row + 5, column=0, columnspan=2, sticky="w")
         self.item_tree = tr
         self._item_cols = cols
         self._refresh_item_table()
@@ -2444,6 +2616,10 @@ class App:
         if self._dead or not self.db:
             return
         a = self.current[self.category]
+        missing = [r.run_id for r in self._selected_infos() if r.run_id not in self.cache]
+        if missing:
+            self._load_then_plot(missing)
+            return
         try:
             items = self._items()
         except Exception as e:
@@ -2476,6 +2652,26 @@ class App:
             self._compute_gen += 1
             self._set_busy(None)
             self._show(a, items, params)
+
+    def _load_then_plot(self, ids):
+        """選到還沒讀進來的 run：先在背景讀（畫面不會卡住），讀完再畫。"""
+        self._compute_gen += 1
+        gen, db = self._compute_gen, self.db
+        self._set_busy((0, len(ids), "讀取資料"))
+
+        def work():
+            for k, rid in enumerate(ids):
+                if gen != self._compute_gen or self._dead:
+                    return
+                if rid not in self.cache:
+                    try:
+                        self.cache[rid] = db.load(rid)
+                    except Exception as e:
+                        self._queue.put(("status", (f"run {rid} 讀取失敗：{e}", "error")))
+                        return
+                self._queue.put(("progress_load", (gen, k + 1, len(ids))))
+            self._queue.put(("ready_for_plot", gen))
+        threading.Thread(target=work, daemon=True).start()
 
     # ---------------------------------------------------------------- 背景計算
     def _start_compute(self, a, items, params):
@@ -2565,7 +2761,8 @@ class App:
         try:
             self.hover.reset()
             if self._click_cid is not None:
-                self.canvas.mpl_disconnect(self._click_cid)
+                for cid in (self._click_cid if isinstance(self._click_cid, list) else [self._click_cid]):
+                    self.canvas.mpl_disconnect(cid)
                 self._click_cid = None
             res = self._render(self.fig, a, items, params)
             self._relayout_panels()
@@ -2583,8 +2780,10 @@ class App:
                 return
             self.result, self.last_items = res, items
             if res.on_click:
-                self._click_cid = self.canvas.mpl_connect("button_press_event",
-                                                          self._wrap_click(res.on_click, self.toolbar))
+                h = self._wrap_click(res.on_click, self.toolbar)
+                events = ("button_press_event", "motion_notify_event", "button_release_event") \
+                    if getattr(res.on_click, "full_events", False) else ("button_press_event",)
+                self._click_cid = [self.canvas.mpl_connect(ev, h) for ev in events]
             ids = ", ".join(str(it.run_id) for it in items)
             self._set_text(f"{a.icon} {a.name}  ·  run {ids}", res.text)
             self._hl_orig = {}
@@ -2633,8 +2832,14 @@ class App:
 
     def _wrap_click(self, handler, toolbar):
         def on_click(event):
-            if str(getattr(toolbar, "mode", "")) or self._legend_at(event) is not None:
+            if str(getattr(toolbar, "mode", "")):
                 return
+            if event.name == "button_press_event":
+                if self._legend_at(event) is not None:
+                    return
+                self.hover.paused = event.button == 1 and getattr(handler, "full_events", False)
+            elif event.name == "button_release_event":
+                self.hover.paused = False
             handler(event)
         return on_click
 
@@ -2767,6 +2972,12 @@ class App:
 
     def _close(self):
         self._save_sash()
+        if self._save_job is not None and self.db:      # 關閉前把還沒寫入的畫面 / 設定存好
+            try:
+                self.root.after_cancel(self._save_job)
+            except Exception:
+                pass
+            self._save_per_run()
         self._gen += 1
         self.root.quit()
         self.root.destroy()

@@ -54,9 +54,19 @@ class SettingsDialog:
         for title, builder in (("外觀", self._tab_theme), ("數據顏色", self._tab_colors),
                                ("資料與輸出", self._tab_data), ("啟動與安裝", self._tab_launch),
                                ("更新", self._tab_update), ("關於", self._tab_about)):
-            fr = tk.Frame(nb, bg=T.CARD, padx=16, pady=12)
-            nb.add(fr, text=f"  {title}  ")
-            self.tabs[title] = fr
+            if title == "更新":                      # 這頁自己有捲動的更新記錄
+                fr = tk.Frame(nb, bg=T.CARD, padx=16, pady=12)
+                nb.add(fr, text=f"  {title}  ")
+                self.tabs[title] = fr
+                builder(fr)
+                continue
+            outer = tk.Frame(nb, bg=T.CARD)            # 內容超出視窗時可以上下捲動
+            nb.add(outer, text=f"  {title}  ")
+            self.tabs[title] = outer
+            sf = ScrollFrame(outer, bg=T.CARD)
+            sf.pack(fill="both", expand=True)
+            fr = tk.Frame(sf.body, bg=T.CARD, padx=16, pady=12)
+            fr.pack(fill="both", expand=True)
             builder(fr)
         if tab in self.tabs:
             nb.select(self.tabs[tab])
@@ -353,6 +363,10 @@ class SettingsDialog:
         ttk.Entry(row, textvariable=self.root_var).pack(side="left", fill="x", expand=True)
         ttk.Button(row, text="瀏覽…", style="Small.TButton", command=self._browse_root).pack(side="left", padx=6)
 
+        self.restore_view = tk.BooleanVar(value=self.app.gui_settings.get("restore_view", True))
+        ttk.Checkbutton(f, text="開啟資料庫時回到上次的畫面（1D/2D、功能、選的 run、篩選）",
+                        variable=self.restore_view).pack(anchor="w", pady=(6, 0))
+
         self._h(f, "輸出", "「存圖」的解析度，以及批次分析輸出的圖檔格式。")
         grid = tk.Frame(f, bg=T.CARD)
         grid.pack(fill="x")
@@ -535,6 +549,8 @@ class SettingsDialog:
             cfg["auto_update_check"] = bool(self.auto_upd.get())
         if hasattr(self, "show_new"):
             cfg["show_whats_new"] = bool(self.show_new.get())
+        if hasattr(self, "restore_view"):
+            cfg["restore_view"] = bool(self.restore_view.get())
         ST.save_settings(cfg)
 
         # settings.toml
