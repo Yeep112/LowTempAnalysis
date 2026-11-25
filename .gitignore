@@ -1,0 +1,12 @@
+# 每台電腦自己的設定與產出（不上傳、更新時也不會被覆蓋）
+settings.toml
+jobs/*.toml
+!jobs/_template.toml
+catalog.csv
+catalog.xlsx
+.catalog_cache.json
+_backup/
+logs/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

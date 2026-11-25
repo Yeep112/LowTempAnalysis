@@ -17,14 +17,19 @@ MUTED = "#6b7280"
 FAINT = "#9ca3af"
 HOVER = "#f3f6fc"
 STRIPE = "#f8fafd"
+SUBTLE = "#f6f8fc"       # 樣式列等淡底
+FIELD = "white"          # 輸入框
+CHIP = "#f1f4f9"         # 小標籤底色
+TEXT_BG = "#f8fafc"      # 文字結果底色
+DARK = False             # 深色版面
 SUCCESS = "#16a34a"
 WARNING = "#d97706"
 ERROR = "#dc2626"
 
 # 1D / 2D 各一個主色，切換分頁時整個介面跟著換色
 ACCENTS = {
-    "1D": dict(main="#2563eb", dark="#1d4ed8", soft="#e6eeff", text="#1e40af"),
-    "2D": dict(main="#7c3aed", dark="#6d28d9", soft="#efe7ff", text="#5b21b6"),
+    "1D": dict(main="#2563eb", dark="#1d4ed8", soft="#e6eeff", text="#1e40af", on="#ffffff"),
+    "2D": dict(main="#7c3aed", dark="#6d28d9", soft="#efe7ff", text="#5b21b6", on="#ffffff"),
 }
 
 # 清單上量測模式的顏色
@@ -54,6 +59,11 @@ def pick_fonts(tkfont):
             break
 
 
+def mix_color(c1, c2, t):
+    from .colors import mix
+    return mix(c1, c2, t)
+
+
 def font(size=10, weight="normal"):
     return (FONT_FAMILY, size, weight)
 
@@ -70,18 +80,21 @@ def setup_ttk(style, accent):
     style.configure("Muted.TLabel", background=CARD, foreground=MUTED, font=font(9))
     style.configure("TCheckbutton", background=CARD, foreground=TEXT)
     style.map("TCheckbutton", background=[("active", CARD)],
-              indicatorcolor=[("selected", a["main"]), ("!selected", "white")])
-    style.configure("TEntry", fieldbackground="white", bordercolor=BORDER, lightcolor=BORDER,
+              indicatorcolor=[("selected", a["main"]), ("!selected", FIELD)])
+    style.configure("TRadiobutton", background=CARD, foreground=TEXT)
+    style.map("TRadiobutton", background=[("active", CARD)],
+              indicatorcolor=[("selected", a["main"]), ("!selected", FIELD)])
+    style.configure("TEntry", fieldbackground=FIELD, foreground=TEXT, insertcolor=TEXT, bordercolor=BORDER, lightcolor=BORDER,
                     darkcolor=BORDER, padding=(6, 4))
     style.map("TEntry", bordercolor=[("focus", a["main"])], lightcolor=[("focus", a["main"])])
-    style.configure("TCombobox", fieldbackground="white", background="white", bordercolor=BORDER,
+    style.configure("TCombobox", fieldbackground=FIELD, background=FIELD, foreground=TEXT, bordercolor=BORDER,
                     lightcolor=BORDER, darkcolor=BORDER, arrowcolor=MUTED, padding=(6, 3))
-    style.map("TCombobox", fieldbackground=[("readonly", "white")],
-              bordercolor=[("focus", a["main"])], selectbackground=[("readonly", "white")],
+    style.map("TCombobox", fieldbackground=[("readonly", FIELD)],
+              bordercolor=[("focus", a["main"])], selectbackground=[("readonly", FIELD)],
               selectforeground=[("readonly", TEXT)])
 
     # 按鈕
-    style.configure("Accent.TButton", background=a["main"], foreground="white", borderwidth=0,
+    style.configure("Accent.TButton", background=a["main"], foreground=a.get("on", "white"), borderwidth=0,
                     focusthickness=0, padding=(16, 8), font=font(10, "bold"))
     style.map("Accent.TButton", background=[("pressed", a["dark"]), ("active", a["dark"])])
     style.configure("Ghost.TButton", background=CARD, foreground=a["text"], borderwidth=1,
@@ -99,11 +112,16 @@ def setup_ttk(style, accent):
     style.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=TEXT,
                     rowheight=26, borderwidth=0, font=font(10))
     style.map("Treeview", background=[("selected", a["soft"])], foreground=[("selected", a["text"])])
-    style.configure("Treeview.Heading", background="#f4f6fb", foreground=MUTED, relief="flat",
+    style.configure("Treeview.Heading", background=SUBTLE, foreground=MUTED, relief="flat",
                     borderwidth=0, font=font(9, "bold"), padding=(4, 5))
     style.map("Treeview.Heading", background=[("active", a["soft"])])
-    style.configure("Vertical.TScrollbar", background="#dde3ee", troughcolor=CARD, borderwidth=0,
-                    arrowcolor=MUTED, gripcount=0)
+    for orient in ("Vertical", "Horizontal"):
+        style.configure(f"{orient}.TScrollbar", background=BORDER, troughcolor=CARD, borderwidth=0,
+                        arrowcolor=MUTED, gripcount=0)
+    style.configure("TNotebook", background=BG, borderwidth=0)
+    style.configure("TNotebook.Tab", background=SUBTLE, foreground=MUTED, padding=(12, 5))
+    style.map("TNotebook.Tab", background=[("selected", CARD)], foreground=[("selected", a["text"])])
+    style.configure("TSpinbox", fieldbackground=FIELD, foreground=TEXT, arrowcolor=MUTED, bordercolor=BORDER)
     style.configure("TPanedwindow", background=BG)
     style.configure("Sash", sashthickness=8, background=BG)
     return a
@@ -129,24 +147,55 @@ def _windows_cjk_fonts():
     return names
 
 
+PLOT_CJK_FONT = ""        # 使用者在設定裡選的圖中中文字型（空白 = 自動）
+_CJK_HINTS = ("JhengHei", "YaHei", "MingLiU", "PMingLiU", "DFKai", "KaiTi", "SimHei", "SimSun", "Ming",
+              "CJK", "PingFang", "Heiti", "Hiragino", "Noto Sans TC", "Noto Sans SC", "Source Han",
+              "Arial Unicode", "Microsoft JhengHei", "Yu Gothic", "Meiryo", "Malgun")
+
+
+def cjk_font_candidates():
+    """matplotlib 找得到、看起來有中文字的字型名稱。"""
+    from matplotlib import font_manager
+    _windows_cjk_fonts()
+    names = sorted({f.name for f in font_manager.fontManager.ttflist
+                    if any(h.lower() in f.name.lower() for h in _CJK_HINTS)})
+    pref = ["Microsoft JhengHei", "Microsoft JhengHei UI", "Microsoft YaHei", "PMingLiU", "MingLiU",
+            "Noto Sans CJK TC", "PingFang TC"]
+    return [n for n in pref if n in names] + [n for n in names if n not in pref]
+
+
+def current_cjk_font():
+    """目前畫中文實際會用到的字型。"""
+    cands = set(cjk_font_candidates())
+    for name in matplotlib.rcParams.get("font.sans-serif", []):
+        if name in cands:
+            return name
+    return ""
+
+
 def apply_mpl_style():
     rc = matplotlib.rcParams
     from matplotlib import font_manager
     cjk = _windows_cjk_fonts()
     have = {f.name for f in font_manager.fontManager.ttflist}
-    cjk += [f for f in ("Microsoft JhengHei", "Microsoft YaHei", "PingFang TC", "Noto Sans CJK TC",
+    cjk += [f for f in ("Microsoft JhengHei", "Microsoft YaHei", "PMingLiU", "PingFang TC", "Noto Sans CJK TC",
                         "Noto Sans CJK JP", "Arial Unicode MS") if f in have and f not in cjk]
+    if PLOT_CJK_FONT and PLOT_CJK_FONT in have and PLOT_CJK_FONT not in cjk:
+        cjk.append(PLOT_CJK_FONT)
     try:
         major, minor = (int(x) for x in matplotlib.__version__.split(".")[:2])
     except ValueError:
         major, minor = 3, 6
     if (major, minor) >= (3, 6):
-        # 新版支援逐字備援：英文用 DejaVu Sans，中文自動改用微軟正黑體
-        rc["font.sans-serif"] = ["DejaVu Sans"] + cjk
+        # 字型要「逐一列出名稱」matplotlib 才會逐字備援（寫 "sans-serif" 只會用到一個字型 → 中文變方框）。
+        # 英文、符號（⊥ ₀ μ Ω）用 DejaVu Sans，中文自動改用中文字型；使用者指定的字型放最前面。
+        order = ([PLOT_CJK_FONT] if PLOT_CJK_FONT in cjk else []) + ["DejaVu Sans"] + \
+                [f for f in cjk if f != PLOT_CJK_FONT]
     else:
-        # 舊版只會用第一個找得到的字型 → 中文字型放第一個，才不會變方框
-        rc["font.sans-serif"] = cjk + ["DejaVu Sans"]
-    rc["font.family"] = "sans-serif"
+        # 舊版只會用第一個找得到的字型 → 中文字型放第一個
+        order = cjk + ["DejaVu Sans"]
+    rc["font.sans-serif"] = order
+    rc["font.family"] = order
     rc["axes.unicode_minus"] = False
     rc.update({
         "figure.facecolor": "white", "axes.facecolor": "white",
@@ -162,26 +211,55 @@ def apply_mpl_style():
     })
 
 
-def apply_theme(cfg):
-    """依設定（gui_settings.json 的 theme / cycle）改變上面的配色。要在建立介面之前呼叫。"""
-    global HEADER, HEADER_2, HEADER_MUTED, BG, PLOT_CYCLE
-    from .colors import THEME_PRESETS, shades, mix, parse_color
+def theme_palette(cfg):
+    """設定 → 一整套顏色（dict）。新版：theme_base（一個顏色）；舊版：theme_preset / theme_custom。"""
+    from .colors import THEME_PRESETS, SWATCHES, derive_theme, legacy_theme, parse_color
     cfg = cfg or {}
+    a1, a2 = cfg.get("theme_accent_1d") or None, cfg.get("theme_accent_2d") or None
+    try:
+        a1 = parse_color(a1) if a1 else None
+        a2 = parse_color(a2) if a2 else None
+    except ValueError:
+        a1 = a2 = None
+    base = cfg.get("theme_base")
+    if base:
+        try:
+            base = parse_color(SWATCHES.get(base, base))
+            if base == SWATCHES["預設藍"]:
+                th = THEME_PRESETS["藍紫（預設）"]
+                return legacy_theme(th["header"], th["bg"], a1 or th["accent_1d"], a2 or th["accent_2d"])
+            return derive_theme(base, a1, a2)
+        except ValueError:
+            pass
     th = dict(THEME_PRESETS["藍紫（預設）"])
     preset = cfg.get("theme_preset")
     if preset in THEME_PRESETS:
         th.update(THEME_PRESETS[preset])
-    th.update({k: v for k, v in (cfg.get("theme_custom") or {}).items() if v} if preset == "自訂" else {})
+    if preset == "自訂":
+        th.update({k: v for k, v in (cfg.get("theme_custom") or {}).items() if v})
     try:
-        HEADER = parse_color(th["header"])
-        BG = parse_color(th["bg"])
-        HEADER_2 = mix(HEADER, "#ffffff", 0.12)
-        HEADER_MUTED = mix(HEADER, "#ffffff", 0.62)
-        ACCENTS["1D"] = shades(th["accent_1d"])
-        ACCENTS["2D"] = shades(th["accent_2d"])
-        MODE_COLORS["2D"] = ACCENTS["2D"]["dark"]
+        return legacy_theme(th["header"], th["bg"], a1 or th["accent_1d"], a2 or th["accent_2d"])
     except ValueError:
-        pass
+        th = THEME_PRESETS["藍紫（預設）"]
+        return legacy_theme(th["header"], th["bg"], th["accent_1d"], th["accent_2d"])
+
+
+def apply_theme(cfg):
+    """依設定（gui_settings.json）改變上面的配色。要在建立介面之前呼叫（換配色時介面會重建）。"""
+    global PLOT_CYCLE, DARK, PLOT_CJK_FONT
+    from .colors import parse_color
+    cfg = cfg or {}
+    PLOT_CJK_FONT = cfg.get("plot_cjk_font") or ""
+    g = globals()
+    t = theme_palette(cfg)
+    for k in ("BG", "CARD", "BORDER", "HEADER", "HEADER_2", "HEADER_TEXT", "HEADER_MUTED", "TEXT", "MUTED",
+              "FAINT", "HOVER", "STRIPE", "SUBTLE", "FIELD", "CHIP", "TEXT_BG"):
+        g[k] = t[k]
+    DARK = t["dark"]
+    ACCENTS["1D"] = t["ACCENTS"]["1D"]
+    ACCENTS["2D"] = t["ACCENTS"]["2D"]
+    MODE_COLORS["2D"] = ACCENTS["2D"]["dark"]
+    MODE_COLORS["current_bias"] = ACCENTS["1D"]["dark"]
     cyc = cfg.get("cycle")
     if cyc:
         try:

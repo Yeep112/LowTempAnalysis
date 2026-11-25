@@ -160,6 +160,20 @@ edges = [
   search_uA = 40
   min_step = 0.3
 
+  # Ic(T) 擬合（同介面的「Ic vs T 擬合」）。不需要就把整個區塊刪掉或加上 # 註解
+  [job.ic_fit]
+  curves = "outer: outer +, outer -; inner: inner +, inner -"   # Ic = 正側 − 負側
+  missing_zero = true          # 找不到的轉折位置視為 0
+  # zero_from = "inner: 2.6"   # 這個溫度以上 Ic inner 強制為 0
+  exclude_T = []               # 不使用的溫度
+  extra_zero_T = [3.1]         # 額外加入 Ic = 0 的溫度（決定 Tc 上限）
+  T_bulk = 7.2
+  tc_bracket = true
+  shared_tc = "Stage 3 (p=2)"  # 或直接寫數字，例如 "3.08"
+  sns_curves = ["inner"]
+  t0_max = 100.0
+  final = "outer: AB (free Tc); inner: Diffusive SNS (free Tc), Diffusive SNS (shared Tc)"
+
 
 # ------------------------------------------------------------
 # IV 二次微分找四個轉折點 + Ic vs T（notebook 第 18、19 格）

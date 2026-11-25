@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import os
 
-DEFAULT_STYLE = dict(grid=True, xlabel=12, ylabel=12, cbar=12, ticks=10, legend=8, title=11)
+DEFAULT_STYLE = dict(grid=True, xlabel=12, ylabel=12, cbar=12, ticks=10, legend=8, title=11,
+                     layout="左右並排（可捲動）", panel_w=520, panel_h=380)
+LAYOUTS = ["左右並排（可捲動）", "上下排列（可捲動）", "縮放填滿視窗"]
 
 # 介面上的欄位：(key, 標籤)
 FIELDS = [("xlabel", "X 標籤"), ("ylabel", "Y 標籤"), ("cbar", "色條標籤"),

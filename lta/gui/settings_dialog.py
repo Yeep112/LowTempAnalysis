@@ -15,7 +15,7 @@ from tkinter import ttk, filedialog, messagebox, colorchooser
 
 from . import theme as T
 from . import style as ST
-from .colors import THEME_PRESETS, DEFAULT_CYCLE, parse_color
+from .colors import THEME_PRESETS, DEFAULT_CYCLE, SWATCHES, parse_color, describe_base
 from .launcher import TOOL_ROOT, log_dir
 
 
@@ -34,36 +34,48 @@ def update_toml_value(path, key, literal):
 
 
 class SettingsDialog:
-    def __init__(self, app):
+    def __init__(self, app, tab=None, geometry=None):
         self.app = app
         self.cfg = dict(app.gui_settings)
         self.win = win = tk.Toplevel(app.root)
         win.title("設定")
-        win.geometry("780x600")
+        win.geometry(geometry or "820x660")
         win.configure(bg=T.BG)
         win.transient(app.root)
-        self.theme_var = tk.StringVar(value=self.cfg.get("theme_preset", "藍紫（預設）"))
-        custom = {**THEME_PRESETS["藍紫（預設）"], **(self.cfg.get("theme_custom") or {})}
-        self.custom_vars = {k: tk.StringVar(value=v) for k, v in custom.items()}
+        self.base_var = tk.StringVar(value=self._current_base())
+        self.acc1_var = tk.StringVar(value=self.cfg.get("theme_accent_1d", ""))
+        self.acc2_var = tk.StringVar(value=self.cfg.get("theme_accent_2d", ""))
         self.cycle = list(self.cfg.get("cycle") or T.PLOT_CYCLE)
 
         nb = ttk.Notebook(win)
         nb.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+        self.tabs = {}
         for title, builder in (("外觀", self._tab_theme), ("數據顏色", self._tab_colors),
                                ("資料與輸出", self._tab_data), ("啟動與安裝", self._tab_launch),
                                ("更新", self._tab_update), ("關於", self._tab_about)):
             fr = tk.Frame(nb, bg=T.CARD, padx=16, pady=12)
             nb.add(fr, text=f"  {title}  ")
+            self.tabs[title] = fr
             builder(fr)
+        if tab in self.tabs:
+            nb.select(self.tabs[tab])
 
         bf = tk.Frame(win, bg=T.BG)
         bf.pack(fill="x", padx=10, pady=(4, 10))
         ttk.Button(bf, text="取消", style="Ghost.TButton", command=win.destroy).pack(side="right")
-        ttk.Button(bf, text="儲存", style="Ghost.TButton", command=self.save).pack(side="right", padx=6)
-        ttk.Button(bf, text="儲存並重新開啟", style="Accent.TButton",
-                   command=lambda: self.save(restart=True)).pack(side="right")
-        tk.Label(bf, text="介面配色需要重新開啟才會套用；其他設定按「儲存」立即生效。", bg=T.BG,
+        ttk.Button(bf, text="儲存", style="Accent.TButton", command=self.save).pack(side="right", padx=6)
+        tk.Label(bf, text="介面顏色點一下就套用；其他分頁的設定按「儲存」生效。", bg=T.BG,
                  fg=T.MUTED, font=T.font(9)).pack(side="left")
+
+    def _current_base(self):
+        base = self.cfg.get("theme_base")
+        if base:
+            return SWATCHES.get(base, base)
+        if self.cfg.get("theme_preset") == "自訂":
+            return (self.cfg.get("theme_custom") or {}).get("bg", SWATCHES["預設藍"])
+        if self.cfg.get("theme_preset") in THEME_PRESETS:
+            return THEME_PRESETS[self.cfg["theme_preset"]]["bg"]
+        return SWATCHES["預設藍"]
 
     # ------------------------------------------------------------------ 小工具
     def _h(self, parent, text, sub=None):
@@ -88,51 +100,155 @@ class SettingsDialog:
 
     # ------------------------------------------------------------------ 外觀
     def _tab_theme(self, f):
-        self._h(f, "介面配色", "選一組配色，或選「自訂」自己挑顏色（可輸入 HEX 或 R, G, B，也可以點色塊用色盤選）。")
-        for name, th in THEME_PRESETS.items():
-            row = tk.Frame(f, bg=T.CARD)
-            row.pack(fill="x", pady=2)
-            ttk.Radiobutton(row, text=name, value=name, variable=self.theme_var).pack(side="left")
-            sw = tk.Frame(row, bg=T.CARD)
-            sw.pack(side="left", padx=12)
-            for key in ("header", "bg", "accent_1d", "accent_2d"):
-                self._swatch(sw, th[key], 4).pack(side="left", padx=2)
+        self._h(f, "介面顏色", None)
         row = tk.Frame(f, bg=T.CARD)
-        row.pack(fill="x", pady=(10, 2))
-        ttk.Radiobutton(row, text="自訂", value="自訂", variable=self.theme_var).pack(side="left")
+        row.pack(fill="x", pady=(4, 8))
+        self._circles = {}
+        cur = self._safe(self.base_var.get(), "")
+        for name, c in SWATCHES.items():
+            cell = tk.Frame(row, bg=T.CARD)
+            cell.pack(side="left", padx=(0, 10))
+            cv = tk.Canvas(cell, width=52, height=52, bg=T.CARD, highlightthickness=0, cursor="hand2")
+            cv.pack()
+            cv.create_oval(6, 6, 46, 46, fill=c, outline=T.BORDER, width=1)
+            ring = cv.create_oval(2, 2, 50, 50, outline="", width=2.5)
+            tk.Label(cell, text=name, bg=T.CARD, fg=T.TEXT, font=T.font(9)).pack()
+            cv.bind("<Button-1>", lambda e, col=c: self._choose_base(col))
+            self._circles[c] = (cv, ring)
+        self._mark_circle(cur)
+
+        self._h(f, "自訂 Hex 色碼", None)
+        hrow = tk.Frame(f, bg=T.CARD)
+        hrow.pack(fill="x", pady=(2, 4))
+        self._base_sw = tk.Label(hrow, text="    ", width=5, bg=cur or "#ffffff", relief="flat",
+                                 highlightthickness=1, highlightbackground=T.BORDER, cursor="hand2")
+        self._base_sw.pack(side="left", ipady=6)
+        self._base_sw.bind("<Button-1>", lambda e: self._pick_base())
+        ent = ttk.Entry(hrow, textvariable=self.base_var, width=14, font=T.font(11))
+        ent.pack(side="left", padx=8)
+        ent.bind("<Return>", lambda e: self._choose_base(self.base_var.get()))
+        ttk.Button(hrow, text="🎨 色盤", style="Ghost.TButton", command=self._pick_base).pack(side="left")
+        ttk.Button(hrow, text="套用", style="Accent.TButton",
+                   command=lambda: self._choose_base(self.base_var.get())).pack(side="left", padx=6)
+        self._kind_lab = tk.Label(hrow, text="", bg=T.CARD, fg=T.MUTED, font=T.font(9))
+        self._kind_lab.pack(side="left", padx=8)
+        tk.Label(f, text="淺色（例如薰衣草紫）會直接當作背景；較深或較飽和的顏色會當作重點色；很深的顏色會自動切成"
+                 "深色版面。文字對比會自動調整，換成什麼顏色都看得清楚。可輸入 #RRGGBB 或 R, G, B。",
+                 bg=T.CARD, fg=T.MUTED, font=T.font(9), wraplength=740, justify="left").pack(anchor="w", pady=(2, 8))
+        self.base_var.trace_add("write", lambda *a: self._update_preview())
+
+        self._h(f, "預覽", None)
+        self._preview = tk.Frame(f, bg=T.CARD)
+        self._preview.pack(fill="x", pady=(2, 8))
+
+        self._h(f, "進階：1D / 2D 主色（空白 = 依介面顏色自動）", None)
         grid = tk.Frame(f, bg=T.CARD)
-        grid.pack(fill="x", padx=24)
-        labels = {"header": "標題列", "bg": "背景", "accent_1d": "1D 主色", "accent_2d": "2D 主色"}
-        self._custom_sw = {}
-        for r, (key, lab) in enumerate(labels.items()):
-            tk.Label(grid, text=lab, bg=T.CARD, fg=T.MUTED, font=T.font(9)).grid(row=r, column=0, sticky="w", pady=2)
-            ent = ttk.Entry(grid, textvariable=self.custom_vars[key], width=16)
-            ent.grid(row=r, column=1, padx=8, pady=2)
-            sw = self._swatch(grid, self._safe(self.custom_vars[key].get()), 5,
-                              cmd=lambda k=key: self._pick_custom(k))
-            sw.grid(row=r, column=2, pady=2)
-            self._custom_sw[key] = sw
-            self.custom_vars[key].trace_add("write", lambda *a, k=key: self._refresh_custom(k))
-        tk.Label(f, text="提示：1D、2D 主色分別用在兩個分頁的按鈕、選取色與標題圖示。", bg=T.CARD,
-                 fg=T.FAINT, font=T.font(9)).pack(anchor="w", pady=(12, 0))
+        grid.pack(fill="x")
+        self._acc_sw = {}
+        for c, (lab, var) in enumerate((("1D 主色", self.acc1_var), ("2D 主色", self.acc2_var))):
+            tk.Label(grid, text=lab, bg=T.CARD, fg=T.MUTED, font=T.font(9)).grid(row=0, column=c * 3, sticky="w")
+            e = ttk.Entry(grid, textvariable=var, width=12)
+            e.grid(row=0, column=c * 3 + 1, padx=6)
+            e.bind("<Return>", lambda ev: self._choose_base(self.base_var.get()))
+            sw = self._swatch(grid, self._safe(var.get(), T.CARD), 4,
+                              cmd=lambda v=var: self._pick_into(v))
+            sw.grid(row=0, column=c * 3 + 2, padx=(0, 18))
+            self._acc_sw[str(var)] = sw
+            var.trace_add("write", lambda *a: self._update_preview())
+
+        self._h(f, "圖中的中文字型", "圖上的中文（標題、標籤）變成方框時，在這裡換一個字型。")
+        frow = tk.Frame(f, bg=T.CARD)
+        frow.pack(fill="x")
+        fonts = ["自動"] + T.cjk_font_candidates()
+        self.font_var = tk.StringVar(value=self.cfg.get("plot_cjk_font") or "自動")
+        ttk.Combobox(frow, textvariable=self.font_var, values=fonts, state="readonly", width=28).pack(side="left")
+        tk.Label(frow, text=f"目前使用：{T.current_cjk_font() or '（找不到中文字型）'}", bg=T.CARD, fg=T.MUTED,
+                 font=T.font(9)).pack(side="left", padx=10)
+        self._update_preview()
+
+    def _mark_circle(self, color):
+        for c, (cv, ring) in self._circles.items():
+            cv.itemconfigure(ring, outline=T.ACCENTS["1D"]["main"] if c == color else "")
+
+    def _palette_for(self, base):
+        cfg = {"theme_base": base, "theme_accent_1d": self.acc1_var.get().strip(),
+               "theme_accent_2d": self.acc2_var.get().strip()}
+        return T.theme_palette(cfg)
+
+    def _update_preview(self):
+        try:
+            base = parse_color(self.base_var.get())
+        except ValueError:
+            self._kind_lab.configure(text="看不懂這個顏色", fg=T.ERROR)
+            return
+        self._base_sw.configure(bg=base)
+        self._kind_lab.configure(text=f"→ {describe_base(base)}", fg=T.MUTED)
+        for var in (self.acc1_var, self.acc2_var):
+            sw = self._acc_sw.get(str(var))
+            if sw is not None:
+                sw.configure(bg=self._safe(var.get(), T.CARD))
+        t = self._palette_for(base)
+        for w in self._preview.winfo_children():
+            w.destroy()
+        box = tk.Frame(self._preview, bg=t["BG"], highlightthickness=1, highlightbackground=t["BORDER"])
+        box.pack(anchor="w")
+        hd = tk.Frame(box, bg=t["HEADER"], width=520, height=34)
+        hd.pack(fill="x")
+        tk.Label(hd, text="  ◢ 低溫量測分析", bg=t["HEADER"], fg=t["HEADER_TEXT"], font=T.font(10, "bold")).pack(side="left", pady=5)
+        tk.Label(hd, text=" ⚙ 設定 ", bg=t["HEADER_2"], fg=t["HEADER_TEXT"], font=T.font(9)).pack(side="right", padx=8)
+        body = tk.Frame(box, bg=t["BG"], padx=10, pady=10)
+        body.pack(fill="x")
+        for key in ("1D", "2D"):
+            a = t["ACCENTS"][key]
+            card = tk.Frame(body, bg=t["CARD"], highlightthickness=1, highlightbackground=t["BORDER"], padx=10, pady=8)
+            card.pack(side="left", padx=(0, 10))
+            tk.Label(card, text=f"{key} 資料分析", bg=a["main"], fg=a["on"], font=T.font(9, "bold"),
+                     padx=10, pady=3).pack(anchor="w")
+            tk.Label(card, text="已選取的項目", bg=a["soft"], fg=a["text"], font=T.font(9), padx=8).pack(anchor="w", pady=(6, 0))
+            tk.Label(card, text="一般文字　次要說明", bg=t["CARD"], fg=t["TEXT"], font=T.font(9)).pack(anchor="w", pady=(4, 0))
+            tk.Label(card, text="提示文字", bg=t["CARD"], fg=t["MUTED"], font=T.font(8)).pack(anchor="w")
+
+    def _choose_base(self, color):
+        """點顏色 → 立刻套用到整個介面（畫面在原視窗重建，資料與選取都保留）。"""
+        try:
+            base = parse_color(color)
+            for v in (self.acc1_var, self.acc2_var):
+                if v.get().strip():
+                    parse_color(v.get())
+        except ValueError as e:
+            messagebox.showerror("介面顏色", str(e), parent=self.win)
+            return
+        cfg = self.app.gui_settings
+        cfg["theme_base"] = base
+        cfg["theme_accent_1d"] = parse_color(self.acc1_var.get()) if self.acc1_var.get().strip() else ""
+        cfg["theme_accent_2d"] = parse_color(self.acc2_var.get()) if self.acc2_var.get().strip() else ""
+        cfg.pop("theme_preset", None)
+        cfg.pop("theme_custom", None)
+        if self.font_var.get() != (cfg.get("plot_cjk_font") or "自動"):
+            cfg["plot_cjk_font"] = "" if self.font_var.get() == "自動" else self.font_var.get()
+        ST.save_settings(cfg)
+        geo = self.win.geometry()
+        self.win.destroy()
+        new_app = self.app.rebuild()
+        new_app.status(f"已套用介面顏色 {base}", "ok")
+        SettingsDialog(new_app, tab="外觀", geometry=geo)
+
+    def _pick_base(self):
+        c = self._choose(self._safe(self.base_var.get()), "選擇介面顏色")
+        if c:
+            self.base_var.set(c)
+            self._choose_base(c)
+
+    def _pick_into(self, var):
+        c = self._choose(self._safe(var.get(), "#2563eb"), "選擇主色")
+        if c:
+            var.set(c)
 
     def _safe(self, c, fallback="#ffffff"):
         try:
             return parse_color(c)
         except ValueError:
             return fallback
-
-    def _pick_custom(self, key):
-        c = self._choose(self._safe(self.custom_vars[key].get()), "選擇顏色")
-        if c:
-            self.custom_vars[key].set(c)
-            self.theme_var.set("自訂")
-
-    def _refresh_custom(self, key):
-        try:
-            self._custom_sw[key].configure(bg=parse_color(self.custom_vars[key].get()))
-        except ValueError:
-            pass
 
     # ------------------------------------------------------------------ 數據顏色
     def _tab_colors(self, f):
@@ -338,17 +454,9 @@ class SettingsDialog:
     # ------------------------------------------------------------------ 儲存
     def save(self, restart=False):
         cfg = self.app.gui_settings
-        old_theme = (cfg.get("theme_preset"), dict(cfg.get("theme_custom") or {}))
-        preset = self.theme_var.get()
-        custom = {}
-        if preset == "自訂":
-            try:
-                custom = {k: parse_color(v.get()) for k, v in self.custom_vars.items()}
-            except ValueError as e:
-                messagebox.showerror("自訂配色", str(e), parent=self.win)
-                return
-        cfg["theme_preset"] = preset
-        cfg["theme_custom"] = custom
+        old_font = cfg.get("plot_cjk_font") or ""
+        if hasattr(self, "font_var"):
+            cfg["plot_cjk_font"] = "" if self.font_var.get() == "自動" else self.font_var.get()
         self._cycle_from_text()
         cfg["cycle"] = list(self.cycle)
         if hasattr(self, "auto_upd"):
@@ -371,19 +479,15 @@ class SettingsDialog:
             messagebox.showerror("設定", f"無法寫入 settings.toml：{e}", parent=self.win)
             return
 
-        # 立即生效：數據顏色循環
-        T.apply_theme({"cycle": cfg["cycle"], "theme_preset": old_theme[0],
-                       "theme_custom": old_theme[1]})
+        # 立即生效：數據顏色循環、圖中字型
+        T.PLOT_CYCLE = list(cfg["cycle"])
+        T.PLOT_CJK_FONT = cfg.get("plot_cjk_font") or ""
         T.apply_mpl_style()
         if changed_root:
             self.app._scan_dbs()
         self.app._schedule_plot(delay=50)
-        new_theme = (preset, custom)
         self.win.destroy()
         if restart:
             self.app.restart()
-        elif new_theme != old_theme:
-            if messagebox.askyesno("設定", "介面配色要重新開啟才會套用，現在重新開啟嗎？", parent=self.app.root):
-                self.app.restart()
         else:
-            self.app.status("設定已儲存", "ok")
+            self.app.status("設定已儲存" + ("（字型已更換）" if old_font != (cfg.get("plot_cjk_font") or "") else ""), "ok")

@@ -12,7 +12,8 @@ from scipy.signal import savgol_filter
 
 from . import register
 from .iv import get_edges
-from ...core.common import clean_sort, linearize_edges, by_T, coord, enable_hover
+from ...core.common import clean_sort, linearize_edges, coord, enable_hover
+from ...core import steps
 from ...analysis1d.transitions import track_transitions
 
 
@@ -54,107 +55,59 @@ def _prepare_dvdi(ctx, job, r):
                 log=log_d, neg_edge=neg_edge, pos_edge=pos_edge)
 
 
-# ---- 台階轉折點偵測（移植自 notebook 的 TRANSITION_LINES 版本）----
-def _step_profile(I_uA, y_log, window_uA, median_uA):
-    dx = np.median(np.diff(I_uA))
-    k = max(1, int(round(median_uA / dx)))
-    if k % 2 == 0:
-        k += 1
-    y = median_filter(y_log, size=k, mode="nearest")
-    w = max(2, int(round(window_uA / dx)))
-    n = len(y)
-    c = np.concatenate([[0.0], np.cumsum(y)])
-    left = np.full(n, np.nan)
-    right = np.full(n, np.nan)
-    i = np.arange(w, n - w - 1)
-    left[i] = (c[i] - c[i - w]) / w
-    right[i] = (c[i + 1 + w] - c[i + 1]) / w
-    return y, left, right
-
-
-def _find_step(I_uA, left, right, side, lo, hi, min_step):
-    win = (I_uA >= lo) & (I_uA <= hi) & np.isfinite(left) & np.isfinite(right)
-    score = left - right if side == "neg" else right - left
-    cand = np.flatnonzero(win)
-    if cand.size == 0:
-        return None
-    k = cand[np.argmax(score[cand])]
-    if score[k] < min_step:
-        return None
-    return k, float(score[k])
-
-
-def _line_guess(line, p, last):
-    g = line["guess_uA"]
-    if isinstance(g, str) and g == "edge":
-        return p["neg_edge"] if line["side"] == "neg" else p["pos_edge"]
-    if isinstance(g, list):
-        return by_T(g, p["T"], f"{line['name']}.guess_uA")
-    return float(g) if last is None else last
-
-
+# ---- 台階轉折點偵測：共用 lta/core/steps.py ----
 def detect_transitions(processed, lines, cfg):
-    median_uA = float(cfg.get("transition_median_uA", 9))
-    step_window = float(cfg.get("step_window_uA", 15))
-    max_missing_default = int(cfg.get("max_missing", 1))
-    min_gap = float(cfg.get("min_gap_uA", 20))
     manual = {}
     for item in cfg.get("manual_override", []) or []:
         # [線名稱, run_id, 位置uA 或 "none"]
         x = item[2]
         manual[(item[0], int(item[1]))] = None if (x is None or str(x).lower() == "none") else float(x)
-
-    results = {l["name"]: [] for l in lines}
-    state = {l["name"]: dict(last=None, missing=0, active=True) for l in lines}
-    cache = {}
-
-    def profile(p, w):
-        key = (p["run_id"], w)
-        if key not in cache:
-            cache[key] = _step_profile(p["I"], p["log"], w, median_uA)
-        return cache[key]
-
-    for p in sorted(processed, key=lambda q: q["T"]):
-        I_uA = p["I"]
-        for side in ("neg", "pos"):
-            act = [l for l in lines if l["side"] == side and state[l["name"]]["active"]]
-            guesses = {l["name"]: _line_guess(l, p, state[l["name"]]["last"]) for l in act}
-            act.sort(key=lambda l: guesses[l["name"]] * (1 if side == "neg" else -1))
-            bound = -np.inf if side == "neg" else np.inf
-            for line in act:
-                name = line["name"]
-                st = state[name]
-                y, left, right = profile(p, float(line.get("window_uA", step_window)))
-                g = guesses[name]
-                sw = by_T(line.get("search_uA", 40), p["T"], f"{name}.search_uA")
-                if side == "neg":
-                    lo, hi = max(g - sw, bound + min_gap), min(g + sw, 0.0)
-                else:
-                    lo, hi = max(g - sw, 0.0), min(g + sw, bound - min_gap)
-                key = (name, p["run_id"])
-                if key in manual:
-                    if manual[key] is None:
-                        continue
-                    k = int(np.argmin(np.abs(I_uA - manual[key])))
-                    step = np.nan
-                else:
-                    found = _find_step(I_uA, left, right, side, lo, hi,
-                                       float(line.get("min_step", 0.1)))
-                    if found is None:
-                        if results[name]:
-                            st["missing"] += 1
-                            if st["missing"] > int(line.get("max_missing", max_missing_default)):
-                                st["active"] = False
-                        continue
-                    k, step = found
-                st["missing"] = 0
-                st["last"] = float(I_uA[k])
-                bound = float(I_uA[k])
-                y_mark = (0.5 * (left[k] + right[k])
-                          if np.isfinite(left[k]) and np.isfinite(right[k]) else y[k])
-                results[name].append(dict(run_id=p["run_id"], T=p["T"], label=p["label"],
-                                          I_uA=float(I_uA[k]), y=float(y_mark), step=step))
+    results, _ = steps.detect(processed, lines,
+                              median_uA=float(cfg.get("transition_median_uA", 9)),
+                              step_window=float(cfg.get("step_window_uA", 15)),
+                              max_missing=int(cfg.get("max_missing", 1)),
+                              min_gap=float(cfg.get("min_gap_uA", 20)),
+                              manual=manual)
     return results
+
+
+def _ic_fit(ctx, cfg, processed, lines, transitions):
+    """[job.ic_fit]：用偵測到的轉折點算 Ic(T) 並做四個階段的擬合（同介面的「Ic vs T 擬合」）。"""
+    from ...core import icfit
+    from ...analysis1d import ic_vs_T as IC
+    runs = [p["run_id"] for p in processed]
+    tab = steps.table(transitions, steps.normalize_lines(lines), runs)
+    Ts = np.array([p["T"] for p in processed], float)
+    pos = {l["name"]: np.array([tab[r][l["name"]] for r in runs]) * 1e-3 for l in lines}
+    defs = IC.parse_curves(cfg.get("curves", "outer: outer +, outer -; inner: inner +, inner -"))
+    zero_from = cfg.get("zero_from", {})
+    if isinstance(zero_from, str):
+        zero_from = IC.parse_zero_from(zero_from)
+    Ts, pos, Ic = icfit.ic_table(Ts, pos, defs, bool(cfg.get("missing_zero", True)), zero_from,
+                                 cfg.get("exclude_T", []), cfg.get("extra_zero_T", []))
+    d = dict(Ts=Ts, pos=pos, Ic=Ic, defs=defs, source="batch")
+    p = dict(tc_bracket=bool(cfg.get("tc_bracket", True)), T_bulk=float(cfg.get("T_bulk", 7.2)),
+             t0_max=float(cfg.get("t0_max", 100.0)), shared_tc=str(cfg.get("shared_tc", "Stage 3 (p=2)")),
+             sns_curves=",".join(cfg.get("sns_curves", ["inner"])) if isinstance(cfg.get("sns_curves"), list)
+             else str(cfg.get("sns_curves", "inner")))
+    fitter = IC.fit_all(d, p)
+    final = IC.parse_final(cfg.get("final", "outer: AB (free Tc); inner: Diffusive SNS (free Tc), "
+                                             "Diffusive SNS (shared Tc)"))
+    text, export = IC.report(d, fitter, [f"{c}: {m}" for c, m in final if fitter.find(c, m) is None])
+    ctx.log("")
+    for line in text.splitlines():
+        ctx.log(line)
+    for name, (head, rows) in export.items():
+        ctx.save_csv(name, head, rows)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    IC.plot_final(ax, fitter, Ts, final)
+    ax.set_title(cfg.get("title", "Ic(T) physical models"), fontsize=12)
+    fig.tight_layout()
+    ctx.save(fig, "Ic_fit_physical_models")
+    fig, axs = plt.subplots(2, 3, figsize=(16, 9))
+    IC._grid(axs.ravel(), d, fitter, Ts, final)
+    fig.tight_layout()
+    ctx.save(fig, "Ic_fit_stages")
 
 
 @register("dvdi_vs_T", "線性化 dV/dI 溫度疊圖（linear 或 log），可加轉折線追蹤")
@@ -196,6 +149,8 @@ def dvdi_vs_T(ctx, job):
                              f"{q['y']:.5f}", f"{q['step']:.4f}"])
         ctx.save_csv("transitions", ["line", "run_id", "T_K", "I_uA",
                                      "log10_dVdI", "step_decade"], rows)
+        if job.get("ic_fit"):
+            _ic_fit(ctx, job["ic_fit"] if isinstance(job["ic_fit"], dict) else {}, processed, lines, transitions)
 
     def y_at(p, q):
         if is_log:
@@ -254,16 +209,13 @@ def dvdi_vs_T(ctx, job):
     ctx.save(overlay(False), f"{scale}_dVdI_temperature_overlay")
     if transitions:
         ctx.save(overlay(True), f"{scale}_dVdI_temperature_overlay_lines")
-        fig, ax = plt.subplots(figsize=(6, 5))
-        for n, pts in transitions.items():
-            pts = sorted(pts, key=lambda q: q["T"])
-            if pts:
-                ax.plot([q["T"] for q in pts], [q["I_uA"] for q in pts], "-o", ms=4, label=n)
-        ax.axhline(0, color="gray", lw=0.8)
-        ax.set_xlabel("T (K)", fontsize=16)
-        ax.set_ylabel(r"I ($\mu$A)", fontsize=16)
+        from ...analysis1d import step_transitions as STR
+        fig, ax = plt.subplots(figsize=(6.5, 5))
+        STR._i_vs_T(ax, dict(lines=steps.normalize_lines(lines), results=transitions),
+                    {"unit": job.get("I_vs_T_unit", "mA")})
+        ax.set_xlabel("Temperature (K)", fontsize=16)
+        ax.set_ylabel(f"I ({job.get('I_vs_T_unit', 'mA')})", fontsize=16)
         ax.tick_params(labelsize=14)
-        ax.legend(fontsize=9)
         fig.tight_layout()
         ctx.save(fig, "transition_I_vs_T")
 

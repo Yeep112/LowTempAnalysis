@@ -28,7 +28,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from ..core.db import QDB
 from ..core.common import fmt_T, safe_name, ensure_dir
 from ..core.measurement import MODES
-from ..core.registry import load_analyses, Item
+from ..core.registry import load_analyses, Item, Drag, group_params
 from ..batch.runner import load_settings, TOOL_ROOT
 from ..catalog import find_dbs, db_mtime
 from .hover import Hover
@@ -59,8 +59,11 @@ ASSETS = os.path.join(TOOL_ROOT, "assets")
 
 
 class App:
-    def __init__(self, root, db_path=None):
+    UPDATE_INTERVAL_MS = 30 * 60 * 1000      # 執行中每 30 分鐘檢查一次新版本
+
+    def __init__(self, root, db_path=None, restore=None):
         self.root = root
+        self._dead = False
         self.settings = load_settings()
         self.analyses = load_analyses()
         self.db = None
@@ -68,7 +71,13 @@ class App:
         self.all_runs = []
         self.category = "1D"
         self.current = {c: self.analyses[c][0] for c in CATS if self.analyses[c]}
-        self.param_vars = {}
+        self.param_vars = {}            # 設定群組 -> {參數 -> tk 變數}
+        self.saved_params = {}          # 設定群組 -> {參數 -> 文字}（和預設不同的值，存在樣品資料夾）
+        self.labels = {}                # 分析名稱 -> {"suptitle": 文字, "axes": {序號: {title/xlabel/ylabel}}}
+        self._param_defs = {}           # (群組, 參數) -> P
+        self._text_boxes = {}           # (群組, 參數) -> 多行文字框
+        self._save_job = None
+        self._loading_params = False
         self.result = None
         self.last_items = []
         self._click_cid = None
@@ -100,12 +109,67 @@ class App:
         self._welcome()
         root.after(200, self._poll_queue)
         root.after(10000, self._auto_update)
-        if self.gui_settings.get("auto_update_check", True):
-            root.after(3000, self.check_update)
         root.protocol("WM_DELETE_WINDOW", self._close)
-        if db_path:
-            self.open_db(db_path)
-        self._scan_dbs(open_newest=not db_path)
+        if restore:
+            self._restore(restore)
+        else:
+            if self.gui_settings.get("auto_update_check", True):
+                root.after(3000, self.check_update)
+            if db_path:
+                self.open_db(db_path)
+            self._scan_dbs(open_newest=not db_path)
+        root.after(self.UPDATE_INTERVAL_MS, self._periodic_update_check)
+
+    # ================================================================== 換配色：重建畫面
+    def rebuild(self):
+        """套用新配色：在同一個視窗裡重建整個介面，資料、選取、功能都保留（不用重新開啟）。"""
+        if self._save_job is not None:
+            self.root.after_cancel(self._save_job)
+        self._save_per_run()
+        for job in (self._plot_job, self._restyle_job):
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+        state = dict(db=self.db.path if self.db else None, cache=self.cache, category=self.category,
+                     current={c: a.name for c, a in self.current.items()},
+                     selection=list(self.tree.selection()), filters=dict(self._filters),
+                     filter=self.filter_var.get(), db_paths=dict(self._db_paths),
+                     update_info=self._update_info, prompted=self._prompted_version)
+        self._dead = True
+        self._gen += 1
+        for w in self.root.winfo_children():
+            if not isinstance(w, tk.Toplevel):
+                w.destroy()
+        T.apply_theme(self.gui_settings)
+        T.apply_mpl_style()
+        self.root.configure(bg=T.BG)
+        return App(self.root, restore=state)
+
+    def _restore(self, st):
+        self._db_paths = st["db_paths"]
+        self.db_combo["values"] = list(self._db_paths)
+        if st["db"]:
+            self.cache = st["cache"]
+            self.open_db(st["db"], cache=st["cache"])
+        self._filters = st["filters"]
+        if st["category"] != self.category:
+            self.segment.select(0 if st["category"] == "1D" else 1, notify=False)
+            self._on_category(st["category"])
+        for c, name in st["current"].items():
+            a = next((x for x in self.analyses.get(c, []) if x.name == name), None)
+            if a:
+                self.current[c] = a
+        self._load_feature_list()
+        self.filter_var.set(st["filter"])
+        sel = [i for i in st["selection"] if self.tree.exists(i)]
+        if sel:
+            self.tree.selection_set(sel)
+            self._on_select()
+        self._prompted_version = st["prompted"]
+        if st["update_info"]:
+            self._on_update_info(st["update_info"], False, None)
 
     # ================================================================== 版面
     def _build(self):
@@ -148,8 +212,15 @@ class App:
         tf = tk.Frame(logo, bg=T.HEADER)
         tf.pack(side="left")
         tk.Label(tf, text="低溫量測分析", bg=T.HEADER, fg=T.HEADER_TEXT, font=T.font(15, "bold")).pack(anchor="w")
-        tk.Label(tf, text="Low-Temperature Analysis", bg=T.HEADER, fg=T.HEADER_MUTED,
-                 font=T.font(9)).pack(anchor="w")
+        sub = tk.Frame(tf, bg=T.HEADER)
+        sub.pack(anchor="w")
+        tk.Label(sub, text="Low-Temperature Analysis", bg=T.HEADER, fg=T.HEADER_MUTED,
+                 font=T.font(9)).pack(side="left")
+        from .. import __version__
+        self.version_badge = tk.Label(sub, text=f"v{__version__}", bg=T.HEADER_2, fg=T.HEADER_MUTED,
+                                      font=T.font(8, "bold"), padx=6, cursor="hand2")
+        self.version_badge.pack(side="left", padx=(8, 0))
+        self.version_badge.bind("<Button-1>", lambda e: self.open_settings(tab="更新"))
 
         right = tk.Frame(h, bg=T.HEADER)
         right.pack(side="left", fill="x", expand=True, pady=12, padx=(0, 16))
@@ -167,7 +238,7 @@ class App:
         self.update_btn = ttk.Button(right, text="⬆ 有新版本", style="Accent.TButton",
                                      command=lambda: self._prompt_update(self._update_info))
         self._update_info = None
-        self._update_prompted = False
+        self._prompted_version = None
         self.auto_var = tk.BooleanVar(value=True)
         tk.Checkbutton(right, text="量測中自動更新", variable=self.auto_var, bg=T.HEADER, fg=T.HEADER_TEXT,
                        selectcolor=T.HEADER_2, activebackground=T.HEADER, activeforeground=T.HEADER_TEXT,
@@ -290,6 +361,7 @@ class App:
         self.plot_title.pack(fill="x")
         self.plot_sub = tk.Label(tt, text="", bg=T.CARD, fg=T.MUTED, font=T.font(9), anchor="w")
         self.plot_sub.pack(fill="x")
+        self.plot_hint = tk.Label(tt, text="", bg=T.CARD, fg=T.ACCENTS["1D"]["text"], font=T.font(9), anchor="w")
         self.mode_chip = Chip(head, "")
         self.mode_chip.pack(side="right", padx=(6, 0))
         self.n_chip = Chip(head, "")
@@ -305,19 +377,36 @@ class App:
         self._right_paned = vp
         self.root.after(400, self._init_sash)
         self.fig = Figure(figsize=(4, 3), layout="constrained")
-        self.canvas = FigureCanvasTkAgg(self.fig, master=figf)
-        # 要求的大小設小一點：圖的大小一律跟著可見區域走，不會超出被切掉
+        # 圖放在可捲動的區域裡：多張圖時每張保持最小尺寸，不夠放就出現捲軸，不會被壓扁
+        host = tk.Frame(figf, bg=T.CARD)
+        self.plot_host = tk.Canvas(host, bg="white", highlightthickness=0, bd=0)
+        self._vscroll = ttk.Scrollbar(host, orient="vertical", command=self.plot_host.yview)
+        self._hscroll = ttk.Scrollbar(host, orient="horizontal", command=self.plot_host.xview)
+        self.plot_host.configure(xscrollcommand=self._hscroll.set, yscrollcommand=self._vscroll.set)
+        self.plot_host.grid(row=0, column=0, sticky="nsew")
+        host.rowconfigure(0, weight=1)
+        host.columnconfigure(0, weight=1)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_host)
         self.canvas.get_tk_widget().configure(width=320, height=240)
+        self._plot_win = self.plot_host.create_window(0, 0, window=self.canvas.get_tk_widget(), anchor="nw")
+        self._plot_need = (0, 0)
+        self.plot_host.bind("<Configure>", lambda e: self._layout_plot())
+        w = self.canvas.get_tk_widget()
+        w.bind("<MouseWheel>", self._plot_wheel, add="+")
+        w.bind("<Shift-MouseWheel>", lambda e: self._plot_wheel(e, horizontal=True), add="+")
+        w.bind("<Button-4>", lambda e: self._plot_wheel(e, delta=120), add="+")
+        w.bind("<Button-5>", lambda e: self._plot_wheel(e, delta=-120), add="+")
         self.toolbar = FitToolbar(self.canvas, figf, self._fit_view, pack_toolbar=False)
+        tb_bg = T.CARD if not T.DARK else "#e5e7eb"
         try:
-            self.toolbar.configure(background=T.CARD)
+            self.toolbar.configure(background=tb_bg)
             for w in self.toolbar.winfo_children():
-                w.configure(background=T.CARD)
+                w.configure(background=tb_bg)
         except Exception:
             pass
         self.toolbar.update()
         self.toolbar.pack(side="top", fill="x")
-        self.canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+        host.pack(side="top", fill="both", expand=True)
         self.hover = Hover(self.canvas)
         self.canvas.mpl_connect("button_press_event", self._drag_press)
         self.canvas.mpl_connect("motion_notify_event", self._drag_motion)
@@ -326,7 +415,7 @@ class App:
         th = tk.Frame(txtf, bg=T.CARD)
         th.pack(fill="x", pady=(6, 2))
         tk.Label(th, text="≡ 文字結果", bg=T.CARD, fg=T.MUTED, font=T.font(9, "bold")).pack(side="left")
-        self.text = tk.Text(txtf, height=7, font=(T.MONO_FAMILY, 10), wrap="none", bg="#f8fafc",
+        self.text = tk.Text(txtf, height=7, font=(T.MONO_FAMILY, 10), wrap="none", bg=T.TEXT_BG,
                             fg=T.TEXT, bd=0, highlightthickness=1, highlightbackground=T.BORDER,
                             padx=10, pady=8)
         self.text.pack(fill="both", expand=True)
@@ -340,6 +429,159 @@ class App:
                 self._right_paned.sashpos(0, int(h * 0.80))
         except Exception:
             pass
+
+    # ---------------------------------------------------------------- 標題與軸標籤
+    def _label_axes(self, fig=None):
+        fig = fig or self.fig
+        return [ax for ax in fig.axes if ax.axison and ax.get_visible()]
+
+    @staticmethod
+    def _label_value(text):
+        return "" if text.strip() == "-" else text
+
+    def _apply_labels(self, a):
+        ov = self.labels.get(a.name) or {}
+        if ov.get("suptitle"):
+            self.fig.suptitle(self._label_value(ov["suptitle"]))
+        axes = self._label_axes()
+        for idx, d in (ov.get("axes") or {}).items():
+            k = int(idx)
+            if k >= len(axes):
+                continue
+            ax = axes[k]
+            for key, setter in (("title", ax.set_title), ("xlabel", ax.set_xlabel), ("ylabel", ax.set_ylabel)):
+                if d.get(key):
+                    setter(self._label_value(d[key]))
+
+    def edit_labels(self):
+        """✎ 修改圖的標題與軸標籤（依資料庫、分析各自記住；空白 = 自動，「-」= 不顯示）。"""
+        if self.result is None:
+            self.status("先畫出圖，再修改標題與軸標籤", "warn")
+            return
+        a = self.current[self.category]
+        ov = self.labels.setdefault(a.name, {})
+        win = tk.Toplevel(self.root)
+        win.title(f"標題與軸標籤 — {a.name}")
+        win.configure(bg=T.CARD)
+        win.transient(self.root)
+        tk.Label(win, text="空白 = 自動（灰字是目前的自動文字）；輸入「-」= 不顯示；可用 $...$ 寫數學式，例如 $I_c$ (mA)",
+                 bg=T.CARD, fg=T.MUTED, font=T.font(9), wraplength=680, justify="left").pack(anchor="w", padx=12, pady=(10, 4))
+        body = tk.Frame(win, bg=T.CARD)
+        body.pack(fill="both", expand=True, padx=12)
+        entries = {}
+        sup_var = tk.StringVar(value=ov.get("suptitle", ""))
+        tk.Label(body, text="整張圖的標題", bg=T.CARD, fg=T.TEXT, font=T.font(10, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Entry(body, textvariable=sup_var, width=50).grid(row=0, column=1, columnspan=2, sticky="ew", pady=3)
+        cbars = ST.colorbar_axes(self.fig)
+        row = 1
+        saved_axes = ov.get("axes") or {}
+        for k, ax in enumerate(self._label_axes()):
+            kind = "色條" if ax in cbars else "子圖"
+            tk.Label(body, text=f"{kind} {k + 1}", bg=T.CARD, fg=T.ACCENTS[self.category]["text"],
+                     font=T.font(10, "bold")).grid(row=row, column=0, sticky="w", pady=(8, 0))
+            row += 1
+            keys = (("ylabel", "標籤"),) if ax in cbars else (("title", "標題"), ("xlabel", "X 標籤"), ("ylabel", "Y 標籤"))
+            for key, lab in keys:
+                auto = {"title": ax.get_title(), "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel()}[key]
+                var = tk.StringVar(value=saved_axes.get(str(k), {}).get(key, ""))
+                tk.Label(body, text=lab, bg=T.CARD, fg=T.MUTED, font=T.font(9)).grid(row=row, column=0, sticky="w", padx=(12, 0))
+                ttk.Entry(body, textvariable=var, width=36).grid(row=row, column=1, sticky="ew", pady=2)
+                tk.Label(body, text=auto[:40], bg=T.CARD, fg=T.FAINT, font=T.font(9)).grid(row=row, column=2, sticky="w", padx=8)
+                entries[(k, key)] = var
+                row += 1
+        body.columnconfigure(1, weight=1)
+
+        def apply(close=False):
+            ov["suptitle"] = sup_var.get().strip()
+            axes = {}
+            for (k, key), var in entries.items():
+                if var.get().strip():
+                    axes.setdefault(str(k), {})[key] = var.get().strip()
+            ov["axes"] = axes
+            self._save_per_run()
+            if close:
+                win.destroy()
+            self.plot()
+
+        def reset():
+            sup_var.set("")
+            for var in entries.values():
+                var.set("")
+            apply()
+        bf = tk.Frame(win, bg=T.CARD)
+        bf.pack(fill="x", padx=12, pady=10)
+        ttk.Button(bf, text="完成", style="Accent.TButton", command=lambda: apply(True)).pack(side="right")
+        ttk.Button(bf, text="套用", style="Ghost.TButton", command=apply).pack(side="right", padx=6)
+        ttk.Button(bf, text="全部恢復自動", style="Ghost.TButton", command=reset).pack(side="left")
+        return win
+
+    # ---------------------------------------------------------------- 多張圖的排版與捲動
+    def _primary_axes(self, fig=None):
+        fig = fig or self.fig
+        return [ax for ax in fig.axes if ax.get_subplotspec() is not None and ax.axison]
+
+    def _relayout_panels(self):
+        """「上下排列」：把一列並排的子圖改成一欄（不改分析程式）。"""
+        if self.plot_style.get("layout") != ST.LAYOUTS[1]:
+            return
+        prim = self._primary_axes()
+        if len(prim) < 2:
+            return
+        specs = [ax.get_subplotspec() for ax in prim]
+        gs = specs[0].get_gridspec()
+        if any(sp.get_gridspec() is not gs for sp in specs) or gs.nrows != 1 or gs.ncols < 2:
+            return
+        new = self.fig.add_gridspec(gs.ncols, 1, height_ratios=gs.get_width_ratios())
+        for ax, sp in zip(prim, specs):
+            ax.set_subplotspec(new[sp.colspan.start:sp.colspan.stop, 0])
+
+    def _panel_need(self):
+        """這張圖需要的最小像素大小 (寬, 高)；0 = 跟視窗一樣大。"""
+        if self.plot_style.get("layout") == ST.LAYOUTS[2]:
+            return (0, 0)
+        prim = self._primary_axes()
+        if len(prim) < 2:
+            return (0, 0)
+        rows = cols = 1
+        for ax in prim:
+            gs = ax.get_subplotspec().get_topmost_subplotspec().get_gridspec()
+            rows, cols = max(rows, gs.nrows), max(cols, gs.ncols)
+        pw = int(self.plot_style.get("panel_w", 520))
+        ph = int(self.plot_style.get("panel_h", 380))
+        return (cols * pw if cols > 1 else 0, rows * ph if rows > 1 else 0)
+
+    def _layout_plot(self):
+        try:
+            aw, ah = int(self.plot_host.winfo_width() or 0), int(self.plot_host.winfo_height() or 0)
+        except (tk.TclError, TypeError, ValueError):
+            return
+        if aw < 20 or ah < 20:
+            return
+        nw, nh = self._plot_need
+        W, H = max(aw, nw), max(ah, nh)
+        self.plot_host.itemconfigure(self._plot_win, width=W, height=H)
+        self.plot_host.configure(scrollregion=(0, 0, W, H))
+        for sb, need, kw in ((self._hscroll, W > aw, dict(row=1, column=0, sticky="ew")),
+                             (self._vscroll, H > ah, dict(row=0, column=1, sticky="ns"))):
+            if need:
+                sb.grid(**kw)
+            else:
+                sb.grid_remove()
+        if W <= aw:
+            self.plot_host.xview_moveto(0)
+        if H <= ah:
+            self.plot_host.yview_moveto(0)
+
+    def _plot_wheel(self, event, horizontal=False, delta=None):
+        d = delta if delta is not None else getattr(event, "delta", 0)
+        step = -1 if d > 0 else 1
+        nw, nh = self._plot_need
+        aw, ah = int(self.plot_host.winfo_width() or 0), int(self.plot_host.winfo_height() or 0)
+        if horizontal or (nh <= ah and nw > aw):
+            if nw > aw:
+                self.plot_host.xview_scroll(step * 3, "units")
+        elif nh > ah:
+            self.plot_host.yview_scroll(step * 3, "units")
 
     def _remember_view(self, fig=None):
         fig = fig or self.fig
@@ -370,25 +612,45 @@ class App:
 
     def _build_style_bar(self, parent):
         """圖表樣式列：格線、字體大小（改了立刻套用，不重新計算）。"""
-        bar = tk.Frame(parent, bg="#f6f8fc", highlightthickness=1, highlightbackground=T.BORDER)
+        bar = tk.Frame(parent, bg=T.SUBTLE, highlightthickness=1, highlightbackground=T.BORDER)
         bar.pack(fill="x", pady=(8, 0))
-        tk.Label(bar, text="圖表樣式", bg="#f6f8fc", fg=T.MUTED, font=T.font(9, "bold")).pack(side="left", padx=(8, 10))
+        tk.Label(bar, text="圖表樣式", bg=T.SUBTLE, fg=T.MUTED, font=T.font(9, "bold")).pack(side="left", padx=(8, 10))
         self.style_vars = {"grid": tk.BooleanVar(value=bool(self.plot_style["grid"]))}
-        tk.Checkbutton(bar, text="格線", variable=self.style_vars["grid"], bg="#f6f8fc", fg=T.TEXT,
-                       activebackground="#f6f8fc", selectcolor="white", font=T.font(9), bd=0,
+        tk.Checkbutton(bar, text="格線", variable=self.style_vars["grid"], bg=T.SUBTLE, fg=T.TEXT,
+                       activebackground=T.SUBTLE, selectcolor=T.FIELD, font=T.font(9), bd=0,
                        highlightthickness=0).pack(side="left", padx=(0, 10))
         for key, label in ST.FIELDS:
-            tk.Label(bar, text=label, bg="#f6f8fc", fg=T.MUTED, font=T.font(9)).pack(side="left", padx=(6, 3))
+            tk.Label(bar, text=label, bg=T.SUBTLE, fg=T.MUTED, font=T.font(9)).pack(side="left", padx=(6, 3))
             var = tk.StringVar(value=str(self.plot_style[key]))
             self.style_vars[key] = var
             ttk.Spinbox(bar, from_=5, to=40, width=3, textvariable=var,
                         command=self._schedule_restyle).pack(side="left", pady=4)
+        ttk.Button(bar, text="恢復預設", style="Small.TButton", command=self._reset_style).pack(side="right", padx=6)
+        bar2 = tk.Frame(parent, bg=T.SUBTLE, highlightthickness=1, highlightbackground=T.BORDER)
+        bar2.pack(fill="x")
+        tk.Label(bar2, text="多張圖", bg=T.SUBTLE, fg=T.MUTED, font=T.font(9, "bold")).pack(side="left", padx=(8, 6))
+        self.style_vars["layout"] = tk.StringVar(value=self.plot_style.get("layout", ST.LAYOUTS[0]))
+        ttk.Combobox(bar2, textvariable=self.style_vars["layout"], values=ST.LAYOUTS, state="readonly",
+                     width=18, font=T.font(9)).pack(side="left", pady=3)
+        for key, label in (("panel_w", "每張最小寬"), ("panel_h", "最小高")):
+            tk.Label(bar2, text=label, bg=T.SUBTLE, fg=T.MUTED, font=T.font(9)).pack(side="left", padx=(10, 3))
+            var = tk.StringVar(value=str(int(self.plot_style.get(key, ST.DEFAULT_STYLE[key]))))
+            self.style_vars[key] = var
+            ttk.Spinbox(bar2, from_=200, to=2000, increment=20, width=5, textvariable=var,
+                        command=self._schedule_restyle).pack(side="left")
+        tk.Label(bar2, text="px", bg=T.SUBTLE, fg=T.FAINT, font=T.font(8)).pack(side="left", padx=(2, 0))
+        ttk.Button(bar2, text="✎ 標題與軸標籤", style="Small.TButton",
+                   command=self.edit_labels).pack(side="right", padx=6, pady=2)
         for var in self.style_vars.values():
             var.trace_add("write", lambda *a: self._schedule_restyle())
-        ttk.Button(bar, text="恢復預設", style="Small.TButton", command=self._reset_style).pack(side="right", padx=6)
 
     def _read_style(self):
-        st = {"grid": bool(self.style_vars["grid"].get())}
+        st = {"grid": bool(self.style_vars["grid"].get()), "layout": self.style_vars["layout"].get()}
+        for key in ("panel_w", "panel_h"):
+            try:
+                st[key] = int(max(200, min(3000, float(self.style_vars[key].get()))))
+            except (TypeError, ValueError):
+                st[key] = self.plot_style.get(key, ST.DEFAULT_STYLE[key])
         for key, _ in ST.FIELDS:
             try:
                 st[key] = max(4, min(60, float(self.style_vars[key].get())))
@@ -403,11 +665,19 @@ class App:
 
     def _restyle(self):
         self._restyle_job = None
+        if self._dead:
+            return
+        old = self.plot_style
         self.plot_style = self._read_style()
         self.gui_settings["style"] = self.plot_style
         ST.save_settings(self.gui_settings)
         if self.result is not None:
+            if old.get("layout") != self.plot_style["layout"]:
+                self._schedule_plot(delay=10)          # 排列方式改了要重新排版
+                return
             ST.apply_style(self.fig, self.plot_style)
+            self._plot_need = self._panel_need()
+            self._layout_plot()
             self.canvas.draw_idle()
 
     def _reset_style(self):
@@ -422,8 +692,10 @@ class App:
         self.status_var = tk.StringVar(value="")
         tk.Label(bar, textvariable=self.status_var, bg=T.CARD, fg=T.TEXT, font=T.font(9),
                  anchor="w").pack(side="left", fill="x", expand=True)
+        from .. import __version__
+        tk.Label(bar, text=f"v{__version__}", bg=T.CARD, fg=T.FAINT, font=T.font(8, "bold")).pack(side="right", padx=(4, 10))
         tk.Label(bar, text="F5 重新整理 · Ctrl+S 存圖 · Enter 繪圖 · Ctrl+A 全選", bg=T.CARD,
-                 fg=T.FAINT, font=T.font(8)).pack(side="right", padx=10)
+                 fg=T.FAINT, font=T.font(8)).pack(side="right", padx=6)
 
     # ================================================================== 主色
     def _apply_accent(self):
@@ -469,7 +741,7 @@ class App:
         if path:
             self.open_db(path)
 
-    def open_db(self, path):
+    def open_db(self, path, cache=None):
         if not path:
             return
         try:
@@ -479,9 +751,10 @@ class App:
             messagebox.showerror("無法開啟", f"{path}\n\n{e}")
             return
         self._gen += 1
-        self.db, self.cache, self.all_runs = db, {}, runs
+        self.db, self.cache, self.all_runs = db, (cache if cache is not None else {}), runs
         self._mtime = db_mtime(db.path)
         self._load_per_run()
+        self._apply_saved_params()
         label = next((k for k, v in self._db_paths.items() if v == db.path), None)
         if label is None:
             label = db.path
@@ -536,6 +809,8 @@ class App:
             self._schedule_plot()
 
     def _auto_update(self):
+        if self._dead:
+            return
         try:
             if self.auto_var.get() and self.db and os.path.exists(self.db.path):
                 m = db_mtime(self.db.path)
@@ -545,6 +820,8 @@ class App:
             self.root.after(10000, self._auto_update)
 
     def _poll_queue(self):
+        if self._dead:
+            return
         try:
             while True:
                 kind, data = self._queue.get_nowait()
@@ -623,7 +900,7 @@ class App:
     def _update_count(self):
         n, s = len(self.tree.get_children()), len(self.tree.selection())
         a = T.ACCENTS[self.category]
-        self.count_chip.set(f"{s} / {n} 已選", fg=a["text"] if s else T.MUTED, bg=a["soft"] if s else "#f1f4f9")
+        self.count_chip.set(f"{s} / {n} 已選", fg=a["text"] if s else T.MUTED, bg=a["soft"] if s else T.CHIP)
 
     def _sort_by(self, col):
         c, desc = self._sort
@@ -693,17 +970,25 @@ class App:
         if a.modes is not None:
             extra.append(f"支援：{a.modes_text}")
         self.help_lab.configure(text=a.help + ("　" + "；".join(extra) if extra else ""))
-        vars_ = self.param_vars.setdefault(a.name, {})
+        store = a.store_key
         row = 0
+        self._text_boxes = {}
         for prm in a.global_params:
-            var = vars_.get(prm.key)
-            if var is None:
-                var = tk.BooleanVar(value=prm.default) if prm.kind == "bool" else tk.StringVar(value=str(prm.default))
-                var.trace_add("write", lambda *x: self._schedule_plot(delay=700))
-                vars_[prm.key] = var
+            var = self._param_var(store, prm)
             if prm.kind == "bool":
                 ttk.Checkbutton(self.param_frame, text=prm.label, variable=var).grid(
                     row=row, column=0, columnspan=2, sticky="w", pady=3)
+            elif prm.kind == "text" and prm.lines > 1:
+                tk.Label(self.param_frame, text=prm.label, bg=T.CARD, fg=T.MUTED, font=T.font(9),
+                         anchor="w").grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 1))
+                row += 1
+                box = tk.Text(self.param_frame, height=prm.lines, width=48, wrap="none", undo=True,
+                              font=("Consolas", 9), relief="solid", bd=1, highlightthickness=0)
+                box.insert("1.0", var.get())
+                box.bind("<KeyRelease>", lambda e, b=box, v=var: self._text_to_var(b, v))
+                box.bind("<FocusOut>", lambda e, b=box, v=var: self._text_to_var(b, v))
+                box.grid(row=row, column=0, columnspan=2, sticky="ew", padx=(0, 4), pady=(0, 3))
+                self._text_boxes[(store, prm.key)] = box
             else:
                 tk.Label(self.param_frame, text=prm.label, bg=T.CARD, fg=T.MUTED, font=T.font(9),
                          anchor="w", justify="left", wraplength=190).grid(row=row, column=0, sticky="w", pady=3)
@@ -723,10 +1008,75 @@ class App:
             tk.Label(self.param_frame, text="這個功能沒有參數", bg=T.CARD, fg=T.FAINT,
                      font=T.font(9)).grid(row=0, column=0, sticky="w")
         self.item_tree = None
+        self._hl_run = None
+        self._hl_orig = {}
         if a.per_item_params:
             self._build_item_table(a, row)
         self.param_frame.columnconfigure(1, weight=1)
         self.param_scroll.to_top()
+
+    # ---------------------------------------------------------------- 參數值（每個資料庫各自記住）
+    def _param_var(self, store, prm):
+        """取得（或建立）參數的 tk 變數；初始值 = 這個資料庫記住的值，沒有就用預設。"""
+        vars_ = self.param_vars.setdefault(store, {})
+        self._param_defs[(store, prm.key)] = prm
+        var = vars_.get(prm.key)
+        if var is None:
+            saved = self.saved_params.get(store, {}).get(prm.key)
+            if prm.kind == "bool":
+                var = tk.BooleanVar(value=prm.default if saved is None else bool(saved))
+            else:
+                var = tk.StringVar(value=str(prm.default) if saved is None else str(saved))
+            var.trace_add("write", lambda *x, st=store, q=prm, v=var: self._on_param_change(st, q, v))
+            vars_[prm.key] = var
+        return var
+
+    @staticmethod
+    def _text_to_var(box, var):
+        text = box.get("1.0", "end-1c")
+        if text != var.get():
+            var.set(text)
+
+    def _on_param_change(self, store, prm, var):
+        try:
+            val = var.get()
+        except tk.TclError:
+            return
+        box = self._text_boxes.get((store, prm.key))
+        if box is not None:
+            try:
+                if box.get("1.0", "end-1c") != val:
+                    box.delete("1.0", "end")
+                    box.insert("1.0", val)
+            except tk.TclError:
+                pass
+        if self._loading_params:
+            return
+        saved = self.saved_params.setdefault(store, {})
+        default = prm.default if prm.kind == "bool" else str(prm.default)
+        if val == default:
+            saved.pop(prm.key, None)
+        else:
+            saved[prm.key] = val
+        if self._save_job is not None:
+            self.root.after_cancel(self._save_job)
+        self._save_job = self.root.after(1000, self._save_per_run)
+        self._schedule_plot(delay=700)
+
+    def _apply_saved_params(self):
+        """換資料庫後，把已建立的參數變數換成新資料庫記住的值。"""
+        self._loading_params = True
+        try:
+            for store, vars_ in self.param_vars.items():
+                saved = self.saved_params.get(store, {})
+                for key, var in vars_.items():
+                    prm = self._param_defs.get((store, key))
+                    if prm is None:
+                        continue
+                    v = saved.get(key, prm.default if prm.kind == "bool" else str(prm.default))
+                    var.set(bool(v) if prm.kind == "bool" else str(v))
+        finally:
+            self._loading_params = False
 
     # ---------------------------------------------------------------- 逐筆設定
     def _per_run_path(self):
@@ -735,17 +1085,22 @@ class App:
     def _load_per_run(self):
         self.per_run = {}
         self.run_colors = {}
+        self.saved_params = {}
+        self.labels = {}
         path = self._per_run_path()
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f).get(self.db.name, {})
             self.run_colors = {int(r): v for r, v in data.pop("__colors__", {}).items()}
+            self.saved_params = {st: dict(v) for st, v in data.pop("__params__", {}).items()}
+            self.labels = data.pop("__labels__", {})
             self.per_run = {an: {k: {int(r): v for r, v in vals.items()} for k, vals in keys.items()}
                             for an, keys in data.items()}
         except (OSError, ValueError, TypeError, AttributeError):
             pass
 
     def _save_per_run(self):
+        self._save_job = None
         path = self._per_run_path()
         if not path:
             return
@@ -761,6 +1116,12 @@ class App:
             allc[self.db.name] = {an: keys for an, keys in clean.items() if keys}
             if self.run_colors:
                 allc[self.db.name]["__colors__"] = {str(r): c for r, c in self.run_colors.items()}
+            params = {st: v for st, v in self.saved_params.items() if v}
+            if params:
+                allc[self.db.name]["__params__"] = params
+            labels = {an: v for an, v in self.labels.items() if v.get("suptitle") or v.get("axes")}
+            if labels:
+                allc[self.db.name]["__labels__"] = labels
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(allc, f, ensure_ascii=False, indent=1)
         except OSError as e:
@@ -769,7 +1130,7 @@ class App:
     def set_item_value(self, key, run_id, value):
         """逐筆設定：寫入一個值（空字串 = 恢復預設）。圖上拖曳也會呼叫這裡。"""
         a = self.current[self.category]
-        store = self.per_run.setdefault(a.name, {}).setdefault(key, {})
+        store = self.per_run.setdefault(a.store_key, {}).setdefault(key, {})
         text = "" if value is None else str(value).strip()
         if text == "":
             store.pop(int(run_id), None)
@@ -799,8 +1160,12 @@ class App:
             tr.heading(q.key, text=q.label)
             tr.column(q.key, width=96 if q.kind != "text" else 130, anchor="e" if q.kind != "text" else "w")
         tr.tag_configure("manual", foreground=acc["text"], background=acc["soft"])
+        self.item_hint = tk.Label(self.param_frame, text="", bg=acc["main"], fg=acc.get("on", "white"),
+                                  font=T.font(9, "bold"), anchor="w", padx=8, pady=3)
         tr.grid(row=row + 2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self._item_hint_row = row + 4
         tr.bind("<Double-1>", self._edit_item_cell)
+        tr.bind("<<TreeviewSelect>>", lambda e: self._on_item_row_select())
         tips = [f"{q.label}：{q.tip}" for q in a.per_item_params if q.tip]
         if tips:
             tk.Label(self.param_frame, text="↳ " + "　".join(tips), bg=T.CARD, fg=T.FAINT, font=T.font(8),
@@ -827,7 +1192,7 @@ class App:
                 defaults = a.item_defaults(items, self._params(per_item=False))
             except Exception:
                 defaults = {}
-        store = self.per_run.get(a.name, {})
+        store = self.per_run.get(a.store_key, {})
         for it in items:
             vals, manual = [it.run_id, f"{it.T:g}" if it.T is not None else ""], False
             for q in a.per_item_params:
@@ -840,6 +1205,85 @@ class App:
                     vals.append(f"({dv:g})" if isinstance(dv, (int, float)) else (f"({dv})" if dv else ""))
             tr.insert("", "end", iid=str(it.run_id), values=vals, tags=("manual",) if manual else ())
         tr.configure(height=max(3, min(len(items), 8)))
+        hl = getattr(self, "_hl_run", None)
+        if hl is not None and tr.exists(str(hl)):
+            tr.selection_set(str(hl))
+            tr.see(str(hl))
+
+    # ---------------------------------------------------------------- 正在設定哪一筆
+    def _on_item_row_select(self):
+        tr = getattr(self, "item_tree", None)
+        sel = tr.selection() if tr is not None else ()
+        if not sel:
+            self._hl_run = None
+            try:
+                self.item_hint.grid_remove()
+            except (tk.TclError, AttributeError):
+                pass
+            self._clear_item_highlight()
+            return
+        rid = int(sel[0])
+        it = next((x for x in self.last_items if x.run_id == rid), None)
+        Tt = f" · {fmt_T(it.T)}" if it is not None and it.T is not None else ""
+        self._hl_run = rid
+        self.item_hint.configure(text=f"✎ 正在設定：run {rid}{Tt}　（圖上用粗線標出，其他資料變淡；Esc 取消）")
+        self.item_hint.grid(row=self._item_hint_row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        tr.bind("<Escape>", lambda e: tr.selection_remove(tr.selection()))
+        self._highlight_item(rid)
+        self.status(f"正在設定 run {rid}{Tt}：雙擊表格修改，或在圖上拖曳這筆的標記", "info")
+
+    def _clear_item_highlight(self, redraw=True):
+        orig = getattr(self, "_hl_orig", None) or {}
+        for art, (lw, alpha, z, ms) in orig.items():
+            try:
+                art.set_linewidth(lw)
+                art.set_alpha(alpha)
+                art.set_zorder(z)
+                if ms is not None:
+                    art.set_markersize(ms)
+            except Exception:
+                pass
+        self._hl_orig = {}
+        try:
+            self.text.tag_remove("hl", "1.0", "end")
+        except (tk.TclError, AttributeError):
+            pass
+        if redraw and orig:
+            self.canvas.draw_idle()
+
+    def _highlight_item(self, rid):
+        self._clear_item_highlight(redraw=False)
+        by_label = {it.label: it.run_id for it in self.last_items}
+        orig = {}
+        for ax in self.fig.axes:
+            for ln in ax.lines:
+                spec = getattr(ln, "lta_drag", None)
+                owner = by_label.get(ln.get_label())
+                if owner is None and spec is not None:
+                    owner = self._drag_spec(ln).run_id
+                if owner is None:
+                    continue
+                orig[ln] = (ln.get_linewidth(), ln.get_alpha(), ln.get_zorder(),
+                            ln.get_markersize() if spec is not None else None)
+                if owner == rid:
+                    ln.set_linewidth(ln.get_linewidth() * 2.2)
+                    ln.set_zorder(ln.get_zorder() + 20)
+                    ln.set_alpha(1.0)
+                    if spec is not None:
+                        ln.set_markersize(ln.get_markersize() * 1.5)
+                else:
+                    ln.set_alpha(0.22)
+        self._hl_orig = orig
+        try:
+            acc = T.ACCENTS[self.category]
+            self.text.tag_configure("hl", background=acc["soft"], foreground=acc["text"])
+            pat = re.compile(rf"(^|\s|run\s+){rid}(\s|$|\))")
+            for k, line in enumerate(self.text.get("1.0", "end").splitlines(), 1):
+                if pat.search(line[:40]):
+                    self.text.tag_add("hl", f"{k}.0", f"{k}.end")
+        except (tk.TclError, AttributeError):
+            pass
+        self.canvas.draw_idle()
 
     def _edit_item_cell(self, event):
         tr = self.item_tree
@@ -855,7 +1299,7 @@ class App:
             return
         x, y, w, h = bbox
         a = self.current[self.category]
-        cur = self.per_run.get(a.name, {}).get(key, {}).get(int(row), "")
+        cur = self.per_run.get(a.store_key, {}).get(key, {}).get(int(row), "")
         ent = ttk.Entry(tr)
         ent.insert(0, cur)
         ent.select_range(0, "end")
@@ -890,7 +1334,10 @@ class App:
     def _clear_item_values(self):
         a = self.current[self.category]
         ids = {int(i) for i in self.tree.selection()}
-        for vals in self.per_run.get(a.name, {}).values():
+        own = {q.key for q in a.per_item_params}
+        for key, vals in self.per_run.get(a.store_key, {}).items():
+            if key not in own:
+                continue
             for rid in list(vals):
                 if rid in ids:
                     vals.pop(rid)
@@ -920,41 +1367,139 @@ class App:
                 best = (d, ln)
         return best[1] if best else None
 
+    @staticmethod
+    def _drag_spec(ln):
+        """把舊寫法 (key, run_id) 統一成 Drag。"""
+        tag = ln.lta_drag
+        if isinstance(tag, Drag):
+            return tag
+        key, rid = tag
+        return Drag(key, rid)
+
     def _drag_press(self, event):
-        if event.button != 1 or str(getattr(self.toolbar, "mode", "")):
+        if str(getattr(self.toolbar, "mode", "")):
+            return
+        if event.button == 3:
+            ln = self._near_draggable(event)
+            if ln is not None and self._drag_spec(ln).menu:
+                self._drag_menu(ln, event)
+            return
+        if event.button != 1:
             return
         ln = self._near_draggable(event)
         if ln is None:
             return
-        tag = ln.lta_drag
-        self._drag = {"tag": tag, "lines": [l for l in self._draggables if l.lta_drag == tag], "x": None}
+        spec = self._drag_spec(ln)
+        lines = [l for l in self._draggables if l.axes is ln.axes and self._drag_spec(l).gid == spec.gid]
+        self._drag = {"spec": spec, "v": None, "lines": lines, "bg": None}
+        # blitting：先畫一張沒有被拖曳物件的背景，拖曳時只重畫被拖的點
+        self.hover.paused = True
+        self.hover._hide_all()
+        try:
+            for l in lines:
+                l.set_animated(True)
+            self.canvas.draw()
+            self._drag["bg"] = self.canvas.copy_from_bbox(self.fig.bbox)
+            self._drag_blit()
+        except Exception:
+            self._drag["bg"] = None
+
+    def _drag_blit(self):
+        d = self._drag
+        if d is None or d["bg"] is None:
+            self.canvas.draw_idle()
+            return
+        try:
+            self.canvas.restore_region(d["bg"])
+            for l in d["lines"]:
+                l.axes.draw_artist(l)
+            self.canvas.blit(self.fig.bbox)
+        except Exception:
+            d["bg"] = None
+            self.canvas.draw_idle()
+
+    def _end_drag_visuals(self, drag):
+        for l in drag["lines"]:
+            try:
+                l.set_animated(False)
+            except Exception:
+                pass
+        self.hover.paused = False
 
     def _drag_motion(self, event):
         if self._drag is None:
             near = self._near_draggable(event) if event.inaxes is not None else None
+            cursor = ""
+            if near is not None:
+                spec = self._drag_spec(near)
+                cursor = "sb_v_double_arrow" if spec.axis == "y" else "sb_h_double_arrow"
+                if spec.tip:
+                    self.status(spec.tip, "info")
             try:
-                self.canvas.get_tk_widget().configure(cursor="sb_h_double_arrow" if near else "")
+                self.canvas.get_tk_widget().configure(cursor=cursor)
             except Exception:
                 pass
             return
-        if event.inaxes is None or event.xdata is None:
+        spec = self._drag["spec"]
+        v = event.ydata if spec.axis == "y" else event.xdata
+        if event.inaxes is None or v is None:
             return
-        x = float(event.xdata)
-        self._drag["x"] = x
+        v = float(v)
+        self._drag["v"] = v
         for ln in self._drag["lines"]:
-            ln.set_xdata([x] * len(ln.get_xdata()))
-        self.canvas.draw_idle()
+            if spec.axis == "y":
+                ln.set_ydata([v] * len(ln.get_ydata()))
+            else:
+                ln.set_xdata([v] * len(ln.get_xdata()))
+        self._drag_blit()
+
+    def _current_item_text(self, key, rid):
+        a = self.current[self.category]
+        return self.per_run.get(a.store_key, {}).get(key, {}).get(int(rid), "")
 
     def _drag_release(self, event):
         if self._drag is None:
             return
         drag, self._drag = self._drag, None
-        if drag["x"] is None:
+        self._end_drag_visuals(drag)
+        if drag["v"] is None:
+            self.canvas.draw_idle()
             return
-        key, rid = drag["tag"]
-        self.set_item_value(key, rid, f"{drag['x']:.4g}")
-        self.status(f"run {rid}：{key} = {drag['x']:.4g}", "ok")
+        spec = drag["spec"]
+        try:
+            new = (spec.value(drag["v"], self._current_item_text(spec.key, spec.run_id))
+                   if spec.value else f"{drag['v']:.4g}")
+        except Exception as e:
+            self.status(f"無法設定：{e}", "error")
+            self._schedule_plot(delay=50)
+            return
+        self.set_item_value(spec.key, spec.run_id, new)
+        self.status(f"run {spec.run_id}：{new if spec.value else f'{spec.key} = {new}'}", "ok")
         self._schedule_plot(delay=50)
+
+    def _drag_menu(self, ln, event):
+        spec = self._drag_spec(ln)
+        menu = tk.Menu(self.root, tearoff=0)
+
+        def run(fn):
+            try:
+                new = fn(self._current_item_text(spec.key, spec.run_id))
+            except Exception as e:
+                self.status(f"無法設定：{e}", "error")
+                return
+            self.set_item_value(spec.key, spec.run_id, new)
+            self._schedule_plot(delay=50)
+        for label, fn in spec.menu:
+            menu.add_command(label=label, command=lambda f=fn: run(f))
+        ge = getattr(event, "guiEvent", None)
+        try:
+            x, y = (ge.x_root, ge.y_root) if ge is not None and hasattr(ge, "x_root") else self.root.winfo_pointerxy()
+        except Exception:
+            x, y = self.root.winfo_rootx() + 200, self.root.winfo_rooty() + 200
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
 
     # ---------------------------------------------------------------- 數據顏色
     def _tree_menu(self, event):
@@ -1100,8 +1645,18 @@ class App:
             self.status(path)
 
     # ---------------------------------------------------------------- 自動更新
+    def _periodic_update_check(self):
+        if self._dead:
+            return
+        if self.gui_settings.get("auto_update_check", True):
+            self.check_update()
+        self.root.after(self.UPDATE_INTERVAL_MS, self._periodic_update_check)
+
     def check_update(self, manual=False):
         """背景檢查 GitHub 上有沒有新版本。"""
+        if self._dead:
+            return
+
         def work():
             try:
                 from .. import updater
@@ -1112,6 +1667,8 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def _on_update_info(self, info, manual, error):
+        if self._dead:
+            return
         if error or info is None:
             if manual:
                 messagebox.showwarning("檢查更新", f"無法連線到 GitHub：{error}", parent=self.root)
@@ -1121,16 +1678,31 @@ class App:
                 messagebox.showinfo("檢查更新", info["error"], parent=self.root)
             return
         if not info["newer"]:
+            self._set_version_badge(None)
             if manual:
                 messagebox.showinfo("檢查更新", f"目前已是最新版本（v{info['current']}）", parent=self.root)
             return
         self._update_info = info
+        self._set_version_badge(info["latest"])
         self.update_btn.configure(text=f"⬆ 更新到 v{info['latest']}")
         self.update_btn.pack(side="left", padx=(10, 0))
         self.status(f"有新版本 v{info['latest']}（目前 v{info['current']}），點右上角按鈕更新", "warn")
-        if manual or (not self._update_prompted and info["latest"] != self.gui_settings.get("skip_version")):
-            self._update_prompted = True
+        if manual or (info["latest"] != self._prompted_version
+                      and info["latest"] != self.gui_settings.get("skip_version")):
+            self._prompted_version = info["latest"]
             self._prompt_update(info)
+
+    def _set_version_badge(self, latest):
+        from .. import __version__
+        try:
+            if latest:
+                a = T.ACCENTS[self.category]
+                self.version_badge.configure(text=f"v{__version__} → v{latest} 可更新", bg=a["main"],
+                                             fg=a.get("on", "white"))
+            else:
+                self.version_badge.configure(text=f"v{__version__}", bg=T.HEADER_2, fg=T.HEADER_MUTED)
+        except tk.TclError:
+            pass
 
     def _prompt_update(self, info):
         if not info:
@@ -1161,9 +1733,9 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     # ---------------------------------------------------------------- 設定、重新開啟
-    def open_settings(self):
+    def open_settings(self, tab=None):
         from .settings_dialog import SettingsDialog
-        SettingsDialog(self)
+        return SettingsDialog(self, tab)
 
     def restart(self):
         """重新開啟軟體（套用介面配色等需要重建畫面的設定）。"""
@@ -1180,17 +1752,25 @@ class App:
     def _reset_params(self):
         a = self.current[self.category]
         for prm in a.global_params:
-            var = self.param_vars.get(a.name, {}).get(prm.key)
+            var = self.param_vars.get(a.store_key, {}).get(prm.key)
             if var is not None:
                 var.set(prm.default if prm.kind == "bool" else str(prm.default))
 
     def _params(self, per_item=True):
         a = self.current[self.category]
-        vars_ = self.param_vars.get(a.name, {})
-        p = {prm.key: prm.parse(vars_[prm.key].get()) if prm.key in vars_ else prm.default
-             for prm in a.global_params}
-        store = self.per_run.get(a.name, {})
-        for prm in a.per_item_params:
+        glob, per = group_params(a)
+        vars_ = self.param_vars.get(a.store_key, {})
+        saved = self.saved_params.get(a.store_key, {})
+        p = {}
+        for prm in glob:
+            if prm.key in vars_:
+                p[prm.key] = prm.parse(vars_[prm.key].get())
+            elif prm.key in saved:
+                p[prm.key] = prm.parse(saved[prm.key])
+            else:
+                p[prm.key] = prm.default
+        store = self.per_run.get(a.store_key, {})
+        for prm in per:
             p[prm.key] = ({rid: prm.parse(v) for rid, v in store.get(prm.key, {}).items() if str(v).strip()}
                           if per_item else {})
         return p
@@ -1256,7 +1836,7 @@ class App:
 
     def plot(self):
         self._plot_job = None
-        if not self.db:
+        if self._dead or not self.db:
             return
         a = self.current[self.category]
         try:
@@ -1286,8 +1866,14 @@ class App:
                 self.canvas.mpl_disconnect(self._click_cid)
                 self._click_cid = None
             res = self._render(self.fig, a, items, params)
+            self._relayout_panels()
+            self._apply_labels(a)
             ST.apply_style(self.fig, self.plot_style)
             self._collect_draggables()
+            self._plot_need = self._panel_need()
+            self._layout_plot()
+            self.root.update_idletasks()
+            self._set_hint(res.hint)
             self.canvas.draw()
             self._home_limits = self._remember_view()
             self._fit_view()
@@ -1297,7 +1883,11 @@ class App:
                                                           self._wrap_click(res.on_click, self.toolbar))
             ids = ", ".join(str(it.run_id) for it in items)
             self._set_text(f"{a.icon} {a.name}  ·  run {ids}", res.text)
+            self._hl_orig = {}
             self._refresh_item_table()
+            if getattr(self, "_hl_run", None) is not None and getattr(self, "item_tree", None) is not None \
+                    and self.item_tree.exists(str(self._hl_run)):
+                self._highlight_item(self._hl_run)
             self.status(f"完成：{a.name}，{len(items)} 筆，{time.time() - t0:.2f} s", "ok")
         except Exception as e:
             traceback.print_exc()
@@ -1321,6 +1911,25 @@ class App:
         mcol = T.MODE_COLORS["2D"] if self.category == "2D" else T.MODE_COLORS.get(items[0].mode, T.MUTED)
         self.mode_chip.set(" · ".join(modes), fg="white", bg=mcol)
 
+    def _reset_plot_area(self):
+        self._plot_need = (0, 0)
+        self._set_hint("")
+        self._clear_item_highlight(redraw=False)
+        try:
+            self._layout_plot()
+        except Exception:
+            pass
+
+    def _set_hint(self, text):
+        try:
+            if text:
+                self.plot_hint.configure(text="💡 " + text, fg=T.ACCENTS[self.category]["text"])
+                self.plot_hint.pack(fill="x")
+            else:
+                self.plot_hint.pack_forget()
+        except tk.TclError:
+            pass
+
     @staticmethod
     def _wrap_click(handler, toolbar):
         def on_click(event):
@@ -1332,6 +1941,7 @@ class App:
     def _welcome(self):
         """還沒選資料時的引導畫面。"""
         self._draggables = []
+        self._reset_plot_area()
         self.fig.clear()
         self.hover.reset()
         a = T.ACCENTS[self.category]
@@ -1353,6 +1963,7 @@ class App:
         self.mode_chip.set("", bg=T.CARD)
 
     def _message(self, title, body, error=False):
+        self._reset_plot_area()
         self.fig.clear()
         self.hover.reset()
         col = T.ERROR if error else T.WARNING

@@ -1,4 +1,6 @@
-"""滑鼠移到圖上時，顯示最近的資料點（曲線）或色圖的數值。適用於所有分析，不用個別寫。"""
+"""滑鼠移到圖上時，顯示最近的資料點（曲線）或色圖的數值。適用於所有分析，不用個別寫。
+
+讀值框用 blitting 畫（只重畫讀值框，不重畫整張圖），滑鼠移動很順；也不會被存進圖檔。"""
 from __future__ import annotations
 
 import numpy as np
@@ -14,20 +16,47 @@ class Hover:
         self.canvas = canvas
         self.max_px = max_px
         self.boxes = {}
+        self.bg = None
+        self.paused = False
         self.cid = canvas.mpl_connect("motion_notify_event", self.on_move)
+        canvas.mpl_connect("draw_event", self._on_draw)
 
     def reset(self):
         """重畫圖（fig.clear()）之後呼叫。"""
         self.boxes = {}
+        self.bg = None
+
+    def _on_draw(self, event=None):
+        try:
+            self.bg = self.canvas.copy_from_bbox(self.canvas.figure.bbox)
+        except Exception:
+            self.bg = None
+
+    def _blit(self):
+        """只重畫讀值框；不支援時退回整張重畫。"""
+        if self.bg is None:
+            self.canvas.draw_idle()
+            return
+        try:
+            self.canvas.restore_region(self.bg)
+            for ax, (ann, dot) in self.boxes.items():
+                if ann.get_visible():
+                    ax.draw_artist(dot)
+                    ax.draw_artist(ann)
+            self.canvas.blit(self.canvas.figure.bbox)
+        except Exception:
+            self.bg = None
+            self.canvas.draw_idle()
 
     def _box(self, ax):
         if ax not in self.boxes:
             ann = ax.annotate("", xy=(0, 0), xytext=(12, 12), textcoords="offset points",
                               fontsize=9, zorder=1000, annotation_clip=False,
-                              bbox=dict(boxstyle="round", fc="white", ec="gray", alpha=0.92))
+                              bbox=dict(boxstyle="round", fc="white", ec="gray", alpha=0.92),
+                              animated=True)
             ann.set_visible(False)
             dot, = ax.plot([], [], "o", ms=7, mfc="none", mec="black", mew=1.2,
-                           zorder=999, gid="nohover")
+                           zorder=999, gid="nohover", animated=True)
             self.boxes[ax] = (ann, dot)
         return self.boxes[ax]
 
@@ -98,10 +127,12 @@ class Hover:
                       f"{_clean(ax.get_ylabel()) or 'y'} = {y:+.5g}")
 
     def on_move(self, event):
+        if self.paused:
+            return
         ax = event.inaxes
         if ax is None or event.xdata is None:
             if self._hide_all():
-                self.canvas.draw_idle()
+                self._blit()
             return
         try:
             hit = self.lookup(ax, event)
@@ -116,7 +147,7 @@ class Hover:
             if ann.get_visible():
                 ann.set_visible(False)
                 dot.set_data([], [])
-                self.canvas.draw_idle()
+                self._blit()
             return
         x, y, text = hit
         ann.xy = (x, y)
@@ -129,4 +160,4 @@ class Hover:
         ann.set_visible(True)
         has_grid = any(getattr(c, "lta_grid", None) is not None for c in ax.collections)
         dot.set_data([] if has_grid else [x], [] if has_grid else [y])
-        self.canvas.draw_idle()
+        self._blit()

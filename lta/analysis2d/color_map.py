@@ -2,7 +2,7 @@
 import numpy as np
 
 from ..core.registry import P, Result, analysis
-from ._common import CMAPS, RANGES, load_view, derivative_view, color_limits, map_with_cut
+from ._common import CMAPS, RANGES, CUT_HINT, load_view, derivative_view, color_limits, map_with_cut
 
 COMMON = [
     P("shift", "以切換電流最大處為慢軸原點（B₀）", True),
@@ -11,6 +11,9 @@ COMMON = [
     P("vmin", "手動下限", 0.0),
     P("vmax", "手動上限", 1.0),
     P("cut", "顯示切線面板", True),
+    P("origin_line", "平移後在 0 畫虛線（B₀ 位置）", True),
+    P("cut_marks", "色圖上標出切線位置", True),
+    P("first_cut", "一開始先畫一條切線（B₀ 或中間）", True),
 ]
 
 
@@ -23,10 +26,11 @@ def value_map(fig, items, p):
     on_click = map_with_cut(fig, v.S, v.F, v.Z, (v.s_label, v.f_label, v.z_label), p["cmap"],
                             color_limits(v.Z, p["range"], p["vmin"], p["vmax"]), p["cut"],
                             title=f"run {it.run_id}", origin_line=bool(v.origin),
-                            cut_title=f"{v.m.z.sym}–{v.m.fast.sym}")
+                            cut_title=f"{v.m.z.sym}–{v.m.fast.sym}", show_origin=p["origin_line"],
+                            cut_marks=p["cut_marks"], first_cut=p["first_cut"])
     text = (f"run {it.run_id}  {it.info.mode_short}：{v.S.shape[0]} × {v.S.shape[1]} 點，"
             f"{v.s_label} {v.s_axis.min():.4g} ~ {v.s_axis.max():.4g}\n{v.note}")
-    return Result(text=text, on_click=on_click)
+    return Result(text=text, on_click=on_click, hint=CUT_HINT if on_click else "")
 
 
 @analysis("2D", "色圖（微分 dZ/dF）+ 點擊切線", group="色圖", icon="∂", order=20, multi=False,
@@ -43,5 +47,7 @@ def derivative_map(fig, items, p):
         dlabel = f"log10({dlabel})"
     on_click = map_with_cut(fig, S, F, D, (v.s_label, v.f_label, dlabel), p["cmap"],
                             color_limits(D, p["range"], p["vmin"], p["vmax"]), p["cut"],
-                            title=f"run {it.run_id}", origin_line=bool(v.origin), cut_title=dlabel.split(" ")[0])
-    return Result(text=f"run {it.run_id}  {it.info.mode_short}\n{v.note}", on_click=on_click)
+                            title=f"run {it.run_id}", origin_line=bool(v.origin), cut_title=dlabel.split(" ")[0],
+                            show_origin=p["origin_line"], cut_marks=p["cut_marks"], first_cut=p["first_cut"])
+    return Result(text=f"run {it.run_id}  {it.info.mode_short}\n{v.note}", on_click=on_click,
+                  hint=CUT_HINT if on_click else "")

@@ -28,8 +28,8 @@ def section_title(parent, text, icon=None, color=None):
 class Chip(tk.Label):
     """小標籤，例如「13 筆」「I→V」。"""
 
-    def __init__(self, parent, text="", fg=T.MUTED, bg="#f1f4f9", **kw):
-        super().__init__(parent, text=text, fg=fg, bg=bg, font=T.font(9, "bold"), padx=8, pady=2, **kw)
+    def __init__(self, parent, text="", fg=None, bg=None, **kw):
+        super().__init__(parent, text=text, fg=fg or T.MUTED, bg=bg or T.CHIP, font=T.font(9, "bold"), padx=8, pady=2, **kw)
 
     def set(self, text, fg=None, bg=None):
         self.configure(text=text)
@@ -42,7 +42,8 @@ class Chip(tk.Label):
 class ScrollFrame(tk.Frame):
     """可上下捲動的區塊；內容放在 self.body。"""
 
-    def __init__(self, parent, bg=T.CARD, **kw):
+    def __init__(self, parent, bg=None, **kw):
+        bg = bg or T.CARD
         super().__init__(parent, bg=bg, **kw)
         self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
         self.sb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
@@ -80,14 +81,14 @@ class Segmented(tk.Frame):
     """大型切換鈕（1D / 2D）。"""
 
     def __init__(self, parent, options, command):
-        super().__init__(parent, bg="#eef1f7", padx=3, pady=3)
+        super().__init__(parent, bg=T.CHIP, padx=3, pady=3)
         self.command = command
         self.buttons = []
         self.active = 0
         for i, (key, title, sub) in enumerate(options):
-            b = tk.Frame(self, bg="#eef1f7", cursor="hand2", padx=10, pady=7)
-            t = tk.Label(b, text=title, bg="#eef1f7", fg=T.MUTED, font=T.font(11, "bold"), cursor="hand2")
-            s = tk.Label(b, text=sub, bg="#eef1f7", fg=T.FAINT, font=T.font(8), cursor="hand2")
+            b = tk.Frame(self, bg=T.CHIP, cursor="hand2", padx=10, pady=7)
+            t = tk.Label(b, text=title, bg=T.CHIP, fg=T.MUTED, font=T.font(11, "bold"), cursor="hand2")
+            s = tk.Label(b, text=sub, bg=T.CHIP, fg=T.FAINT, font=T.font(8), cursor="hand2")
             t.pack(anchor="w")
             s.pack(anchor="w")
             b.grid(row=0, column=i, sticky="nsew", padx=1)
@@ -111,11 +112,12 @@ class Segmented(tk.Frame):
                 a = T.ACCENTS[key]
                 for w in (b, t, s):
                     w.configure(bg=a["main"])
-                t.configure(fg="white")
-                s.configure(fg="#dfe7ff")
+                on = a.get("on", "#ffffff")
+                t.configure(fg=on)
+                s.configure(fg=T.mix_color(on, a["main"], 0.25))
             else:
                 for w in (b, t, s):
-                    w.configure(bg="#eef1f7")
+                    w.configure(bg=T.CHIP)
                 t.configure(fg=T.MUTED)
                 s.configure(fg=T.FAINT)
 
@@ -198,7 +200,7 @@ class FeatureList(tk.Frame):
         for n, c in self.cards.items():
             ok = enabled.get(n, True)
             c["enabled"] = ok
-            c["icon"].configure(fg=acc["main"] if ok else "#c7cdd8")
+            c["icon"].configure(fg=acc["main"] if ok else T.BORDER)
             if n != self.selected:
                 c["title"].configure(fg=T.TEXT if ok else T.FAINT)
-            c["desc"].configure(fg=T.MUTED if ok else "#c7cdd8")
+            c["desc"].configure(fg=T.MUTED if ok else T.BORDER)

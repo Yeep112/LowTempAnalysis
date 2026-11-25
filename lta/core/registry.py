@@ -41,6 +41,7 @@ class P:
     choices: list | None = None
     tip: str = ""
     per_item: bool = False      # True = 每筆 run 可以有自己的值（介面會出現逐筆設定表）
+    lines: int = 1              # 文字參數 > 1 時顯示成多行文字框
 
     @property
     def kind(self):
@@ -76,6 +77,7 @@ class Result:
     export: dict = field(default_factory=dict)      # 名稱 -> (header list, rows)
     on_click: Callable | None = None                 # 色圖點擊切線等互動
     title: str = ""
+    hint: str = ""                                   # 操作提示（顯示在圖的上方，不會畫進圖裡）
 
 
 @dataclass
@@ -91,6 +93,11 @@ class Analysis:
     icon: str = "•"
     order: int = 100
     item_defaults: Callable | None = None   # (items, p) -> {run_id: {key: 預設值}}，給逐筆設定表顯示
+    store: str | None = None    # 設定群組：同群組的分析共用參數值與逐筆設定（預設 = 自己的名稱）
+
+    @property
+    def store_key(self):
+        return self.store or self.name
 
     @property
     def per_item_params(self):
@@ -111,18 +118,20 @@ class Analysis:
 
 
 def analysis(category, name, params=None, help="", multi=True, modes=None,
-             group="基本", icon="•", order=100, item_defaults=None):
+             group="基本", icon="•", order=100, item_defaults=None, store=None):
     """登錄一個分析功能（裝飾器）。
 
     逐筆參數：P(..., per_item=True)。函式收到的 p[key] 是 {run_id: 使用者設定的值}
     （沒設定的 run 不在字典裡，用 item_value(p, key, it, 預設) 取值）。
     item_defaults(items, p) 回傳每筆的預設值，介面的逐筆設定表會顯示它。
-    圖上可拖曳的線或點：artist.lta_drag = (key, run_id)，拖完介面會自動更新該筆的值。"""
+    圖上可拖曳的線或點：artist.lta_drag = (key, run_id)，拖完介面會自動更新該筆的值。
+    進階拖曳（上下拖、右鍵選單）：artist.lta_drag = Drag(...)，見下面的 Drag。
+    store="另一個分析的名稱"：和那個分析共用參數值與逐筆設定（例如轉折點、Ic 擬合共用線性化的 edge）。"""
     def deco(func):
         lst = ANALYSES[category]
         lst[:] = [a for a in lst if a.name != name]        # 重新載入時不重複
         lst.append(Analysis(category, name, func, params or [], help, multi,
-                            tuple(modes) if modes else None, group, icon, order, item_defaults))
+                            tuple(modes) if modes else None, group, icon, order, item_defaults, store))
         lst.sort(key=lambda a: (a.order, a.name))
         return func
     return deco
@@ -139,11 +148,50 @@ def item_value(p, key, it, default=None):
     return values.get(it.run_id, default)
 
 
-def defaults_for(analysis_obj, items):
+def group_params(analysis_obj):
+    """同一設定群組所有分析的參數（自己的優先）：回傳 (一般參數 list, 逐筆參數 list)。"""
+    seen, glob, per = set(), [], []
+    members = [analysis_obj] + [a for lst in ANALYSES.values() for a in lst
+                                if a is not analysis_obj and a.store_key == analysis_obj.store_key]
+    for a in members:
+        for q in a.params:
+            if q.key in seen:
+                continue
+            seen.add(q.key)
+            (per if q.per_item else glob).append(q)
+    return glob, per
+
+
+def defaults_for(analysis_obj, items=None):
     """沒有介面時（例如 Jupyter）產生完整的參數：一般參數用預設值、逐筆參數為空字典。"""
-    p = {q.key: q.default for q in analysis_obj.global_params}
-    p.update({q.key: {} for q in analysis_obj.per_item_params})
+    glob, per = group_params(analysis_obj)
+    p = {q.key: q.default for q in glob}
+    p.update({q.key: {} for q in per})
     return p
+
+
+@dataclass
+class Drag:
+    """圖上可拖曳的點或線（artist.lta_drag = Drag(...)）。
+
+    key / run_id : 拖完後寫入的逐筆參數
+    axis         : "x" 左右拖、"y" 上下拖
+    value        : value(座標, 目前文字) -> 新文字；省略 = 直接寫入座標
+    group        : 同一個 group 的 artist 一起移動（省略 = (key, run_id)）
+    menu         : 右鍵選單 [(標籤, fn(目前文字) -> 新文字), ...]
+    tip          : 滑鼠移上去時狀態列顯示的說明
+    """
+    key: str
+    run_id: int
+    axis: str = "x"
+    value: Callable | None = None
+    group: Any = None
+    menu: list = field(default_factory=list)
+    tip: str = ""
+
+    @property
+    def gid(self):
+        return self.group if self.group is not None else (self.key, self.run_id)
 
 
 def load_analyses(reload=False):
@@ -156,7 +204,22 @@ def load_analyses(reload=False):
             mod = importlib.import_module(f"{pkg_name}.{m.name}")
             if reload:
                 importlib.reload(mod)
+    check_groups()
     return ANALYSES
+
+
+def check_groups():
+    """同一設定群組裡，同名參數必須是同一種設定（否則會互相覆蓋）。"""
+    seen = {}
+    for lst in ANALYSES.values():
+        for a in lst:
+            for q in a.params:
+                sig = (q.per_item, q.kind, repr(q.default), tuple(q.choices or ()))
+                key = (a.store_key, q.key)
+                if key in seen and seen[key][0] != sig:
+                    raise ValueError(f"「{a.name}」的參數 {q.key} 和同群組的「{seen[key][1]}」同名但設定不同，"
+                                     "請換一個名稱")
+                seen.setdefault(key, (sig, a.name))
 
 
 load_gui_analyses = load_analyses

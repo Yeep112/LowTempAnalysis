@@ -135,8 +135,11 @@ def add_map(fig, ax, X, Y, Z, cmap, vlim, zlabel):
     return mesh
 
 
+CUT_HINT = "左鍵點色圖加切線 · 右鍵清除"
+
+
 def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_line=False,
-                 cut_title="cut"):
+                 cut_title="cut", show_origin=True, cut_marks=True, first_cut=True):
     """色圖（左）＋ 切線面板（右）。回傳點擊處理函式（左鍵加切線、右鍵清除）或 None。
     labels = (x 軸, y 軸, z 軸)"""
     xl, yl, zl = labels
@@ -152,7 +155,7 @@ def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_li
     ax.set_ylabel(yl)
     if title:
         ax.set_title(title, fontsize=9)
-    if origin_line:
+    if origin_line and show_origin:
         ax.axvline(0, color="cyan", ls="--", lw=0.8, alpha=0.7, gid="nohover")
     if ax_cut is None:
         return None
@@ -162,16 +165,15 @@ def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_li
     palette = colormaps["tab10"]
     ax_cut.set_xlabel(yl)
     ax_cut.set_ylabel(zl)
-    ax_cut.set_title("左鍵點色圖加切線 · 右鍵清除", fontsize=8, color="0.45")
 
     def add_cut(x):
         i = int(np.argmin(np.abs(X_axis - x)))
         c = palette(state["n"] % 10)
         state["n"] += 1
         ln, = ax_cut.plot(Y[i], Z[i], color=c, lw=1.3, label=f"{X_axis[i]:+.4g}")
-        mk = ax.axvline(X_axis[i], color=c, lw=1.4, gid="nohover")
         state["lines"].append(ln)
-        state["marks"].append(mk)
+        if cut_marks:
+            state["marks"].append(ax.axvline(X_axis[i], color=c, lw=1.4, gid="nohover"))
         ax_cut.relim()
         ax_cut.autoscale_view()
         ax_cut.legend(fontsize=7, title=f"{cut_title} @ {xl}", title_fontsize=7)
@@ -184,7 +186,8 @@ def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_li
         if leg:
             leg.remove()
 
-    add_cut(0.0 if origin_line else X_axis[len(X_axis) // 2])
+    if first_cut:
+        add_cut(0.0 if origin_line else X_axis[len(X_axis) // 2])
 
     def on_click(event):
         if event.inaxes is not ax or event.xdata is None:

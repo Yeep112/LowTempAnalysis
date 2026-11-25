@@ -183,6 +183,18 @@ def cmd_diag(a, settings):
         print(f"  ✓ tkinter     Tk {tkinter.TkVersion}")
     except Exception as e:
         print(f"  ✗ tkinter     {e}")
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        from .gui import theme as T
+        from .gui.style import load_settings as gui_settings
+        T.PLOT_CJK_FONT = gui_settings().get("plot_cjk_font") or ""
+        T.apply_mpl_style()
+        cands = T.cjk_font_candidates()
+        print(f"圖中中文字型  {T.current_cjk_font() or '（找不到 → 圖上的中文會變方框）'}"
+              f"　可用：{', '.join(cands[:6]) or '無'}")
+    except Exception as e:
+        print(f"圖中中文字型  檢查失敗：{e}")
     root = settings.get("data_root")
     print(f"data_root     {root}  {'（存在）' if root and os.path.isdir(root) else '（不存在 → 在軟體的 ⚙ 設定裡改）'}")
     from .gui.launcher import log_dir
