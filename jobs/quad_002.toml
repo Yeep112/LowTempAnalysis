@@ -1,0 +1,252 @@
+# ============================================================
+#  quad_002 的分析設定（對應原本 Analysis.ipynb 的各個格子）
+#
+#  ‧ 改完存檔 → 在 run_analysis.bat 選「執行分析設定檔」就會重新產生所有圖
+#  ‧ 結果在 {樣品資料夾}\01 Figure\quad_002\，打開 index.html 一頁看完
+#  ‧ 不想跑的分析加一行 enabled = false
+#  ‧ 新量到的溫度：用 [job.select] 的會自動納入；edges 等溫度表會自動內插
+# ============================================================
+
+# 只寫檔名也可以，會自動到 settings.toml 的 data_root 底下找
+db = 'quad_002_2026-11-14_01.db'
+
+# 每個 job 共用的預設值（個別 job 可以覆寫）
+[defaults]
+voltage = "meas_voltage_K2"
+
+
+# ------------------------------------------------------------
+# 1D：IV 與 dV/dI（notebook「1D」前三格）
+# ------------------------------------------------------------
+[[job]]
+name = "IV_check"
+type = "iv"
+runs = [99, 125]
+overlay = false
+
+[[job]]
+name = "dVdI_raw"
+type = "dvdi"
+runs = [125]
+
+# 兩側 Huber 直線取代雜訊（notebook 第 13、14 格）
+[[job]]
+name = "linearized"
+type = "linearize"
+runs = [99, 125]
+edge_width_uA = 500
+edges_by_run = { "99" = [-666, 720], "125" = [-875, 955] }
+show_raw_dvdi = false
+
+
+# ------------------------------------------------------------
+# 溫度序列：線性化 dV/dI 疊圖（notebook 第 15 格）
+# ------------------------------------------------------------
+[[job]]
+name = "dVdI_vs_T_linear"
+type = "dvdi_vs_T"
+scale = "linear"
+offset_step = 500          # 每條曲線往上平移 500 Ω
+edge_width_uA = 500
+smooth_window = 1
+save_individual = true
+
+# edges：[T, 負側 uA, 正側 uA]；表上沒有的溫度自動線性內插
+edges = [
+  [1.6, -870, 950], [1.7, -868, 945], [1.8, -864, 939], [1.9, -861, 923],
+  [2.0, -851, 923], [2.1, -848, 913], [2.2, -838, 897], [2.3, -822, 880],
+  [2.4, -796, 864], [2.5, -774, 835], [2.6, -767, 812], [2.7, -720, 760],
+  [2.8, -666, 718],
+]
+
+  # 自動挑 run：同一組接點、run 104~116、同溫度只留最新一筆
+  # （注意：[job.select] 要放在這個 job 的最後面，之後的設定才不會被算進 select）
+  [job.select]
+  contacts = "I+_38, V+_39, V-_40, I-_41"
+  run_range = [104, 116]
+  T_range = [1.6, 2.8]
+  duplicates = "latest"
+
+
+# ------------------------------------------------------------
+# 溫度序列：log10(dV/dI) + 轉折線追蹤 + I-T 相圖（notebook 第 16、17 格）
+# ------------------------------------------------------------
+[[job]]
+name = "dVdI_vs_T_log"
+type = "dvdi_vs_T"
+scale = "log"
+offset_step = 2            # 每條曲線往上平移 2 decade
+edge_width_uA = 500
+smooth_window = 1
+log_floor_ohm = 1e-6
+downward_jump_decade = 0.25
+median_window = 5
+
+# 台階偵測
+transition_median_uA = 9
+step_window_uA = 15
+max_missing = 1
+min_gap_uA = 20
+# 手動修正：[線名稱, run_id, 位置 uA]；位置寫 "none" = 該 run 不畫點
+manual_override = [
+  # ["inner +", 108, 430.0],
+  # ["center -", 104, "none"],
+]
+
+edges = [
+  [1.6, -870, 950], [1.7, -868, 945], [1.8, -864, 939], [1.9, -861, 923],
+  [2.0, -851, 923], [2.1, -848, 913], [2.2, -838, 897], [2.3, -822, 880],
+  [2.4, -796, 864], [2.5, -774, 835], [2.6, -767, 812], [2.7, -720, 760],
+  [2.8, -666, 718],
+]
+
+  [job.select]
+  contacts = "I+_38, V+_39, V-_40, I-_41"
+  run_range = [104, 116]
+  T_range = [1.6, 2.8]
+  duplicates = "latest"
+
+  # 每一條紅線一個區塊。guess_uA 三種寫法：
+  #   "edge"             → 用 edges 當猜測（最外側）
+  #   數字               → 最低溫的起點，之後追蹤上一個溫度的位置
+  #   [[T, I], [T, I]]   → 錨點，中間溫度內插
+  # search_uA 可寫數字或 [[T, 寬度], ...]
+  [[job.transition_lines]]
+  name = "outer -"
+  side = "neg"
+  guess_uA = "edge"
+  search_uA = 40
+  min_step = 0.3
+
+  [[job.transition_lines]]
+  name = "inner -"
+  side = "neg"
+  guess_uA = [[1.6, -500], [1.9, -460], [2.1, -380], [2.3, -280], [2.5, -190], [2.8, -80]]
+  search_uA = 60
+  min_step = 0.05
+  window_uA = 30
+  max_missing = 2
+
+  [[job.transition_lines]]
+  name = "center -"
+  side = "neg"
+  guess_uA = -150
+  search_uA = 60
+  min_step = 0.15
+
+  [[job.transition_lines]]
+  name = "center +"
+  side = "pos"
+  guess_uA = [[1.6, 225], [1.7, 232], [1.8, 240], [1.9, 150], [2.0, 125], [2.1, 95],
+              [2.2, 70], [2.3, 50], [2.4, 40], [2.5, 25], [2.6, 20]]
+  search_uA = [[1.6, 50], [1.8, 50], [1.9, 30], [2.6, 20]]
+  min_step = 0.05
+  max_missing = 2
+
+  [[job.transition_lines]]
+  name = "inner +"
+  side = "pos"
+  guess_uA = [[1.6, 530], [1.8, 430], [2.0, 320], [2.2, 230], [2.3, 265],
+              [2.4, 155], [2.5, 125], [2.6, 125], [2.8, 120]]
+  search_uA = [[1.6, 60], [2.3, 60], [2.4, 30], [2.8, 30]]
+  min_step = 0.05
+  window_uA = 30
+  max_missing = 2
+
+  [[job.transition_lines]]
+  name = "outer +"
+  side = "pos"
+  guess_uA = "edge"
+  search_uA = 40
+  min_step = 0.3
+
+
+# ------------------------------------------------------------
+# IV 二次微分找四個轉折點 + Ic vs T（notebook 第 18、19 格）
+# ------------------------------------------------------------
+[[job]]
+name = "IV_transitions_vs_T"
+type = "iv_transitions"
+runs = [116, 115, 114, 113, 112, 111, 110, 109, 108, 107, 106, 105, 103, 102, 99, 137, 139]
+offset_step_mV = 0.5
+ylim = [-0.7, 6.5]
+names = ["neg outer", "neg inner", "pos inner", "pos outer"]
+initial_guess_mA = [-0.85, -0.50, 0.53, 0.92]
+window_length = 15
+poly_order = 3
+first_half_width_mA = 0.12
+step_in_mA = 0.20
+step_out_mA = 0.05
+min_gap_mA = 0.08
+# 後處理
+unresolved_to_zero = true    # 找不到的轉折當作 0
+inner_zero_above_K = 2.6     # 這個溫度以上 inner 轉折強制為 0
+no_transition_T = [3.8]      # 這些溫度沒有轉折（不畫）
+
+
+# ------------------------------------------------------------
+# 2D：磁場掃描（notebook「2D」）
+# ------------------------------------------------------------
+[[job]]
+name = "field_map"
+type = "field_map"
+runs = [142]
+shift_B0 = false
+cmap = "magma"
+
+[[job]]
+name = "field_map_shifted"
+type = "field_map"
+runs = [142, 134]
+shift_B0 = true              # 以正向切換電流最大的磁場 B0 為原點
+B0_threshold_mV = 0.5
+B0_search_mT = ["none", "none"]   # 例如 [2, 6] 只在 2~6 mT 找 B0
+
+[[job]]
+name = "field_dVdI_map"
+type = "field_dvdi_map"
+runs = [134]
+cmap = "hot"
+vmin = 0
+vmax = 1
+
+# 指定磁場切 IV：transition point 與 bulk transition（notebook 第 27 格）
+[[job]]
+name = "field_cuts"
+type = "field_cuts"
+runs = [142]
+shift_B0 = true
+fields_mT = [-1.5, -1.35, -1.2, -1.05, -0.9, -0.75, -0.6, -0.45, -0.3, -0.15, 0,
+             0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.05, 1.2, 1.35, 1.5, 1.65, 1.8, 1.95, 2.1]
+# 也可以寫成範圍：fields_mT = { start = -1.5, stop = 2.1, step = 0.15 }
+field_tolerance_mT = "auto"   # auto = 沒有剛好的磁場就用最近的資料；填數字 = 超過這個距離才略過
+transition_label = "transition point"
+bulk_label = "bulk transition"
+baseline_max_uA = 300
+kink_threshold_mV = 0.05
+n_sigma = 5
+consecutive = 3
+jump_mV = 1.0
+kink_fit_points = 8
+bulk = true
+bulk_threshold_mV = 1.2
+bulk_lookback = 4
+bulk_window_uA = 60
+bulk_min_step_mV = 0.05
+
+
+# ------------------------------------------------------------
+# 自動總覽：這組接點所有溫度的 IV（之後新量的溫度會自動加入）
+# ------------------------------------------------------------
+[[job]]
+name = "IV_overview_auto"
+type = "iv"
+individual = false
+offset_mV = 0
+x_unit = "mA"
+
+  [job.select]
+  contacts = "I+_38, V+_39, V-_40, I-_41"
+  kind = "IV"
+  sweep = "none"             # 只要名稱沒有標 I+_I- / I-_I+ 的
+  duplicates = "latest"

@@ -1,0 +1,11 @@
+{
+  "version": "2.3.0",
+  "repo": "",
+  "branch": "main",
+  "date": "2026-11-25",
+  "notes": [
+    "run_analysis.bat 直接開啟軟體，關掉黑色視窗也不影響",
+    "透過 GitHub 自動更新",
+    "更完整地尋找 Python，找不到時會說明原因並可自動安裝"
+  ]
+}

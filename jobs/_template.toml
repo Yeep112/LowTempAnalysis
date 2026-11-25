@@ -1,0 +1,63 @@
+# ============================================================
+#  新樣品的分析設定（由「建立新的分析設定檔」自動產生）
+#  不需要的 job 刪掉或加 enabled = false；需要的把數值改一改
+#  完整範例請看 quad_002.toml，所有參數說明請看 README.md
+# ============================================================
+
+db = '{{DB}}'
+
+[defaults]
+voltage = "meas_voltage_K2"
+
+
+# 這組接點所有溫度的 IV 總覽（新量的溫度會自動加入）
+[[job]]
+name = "IV_overview"
+type = "iv"
+individual = false
+x_unit = "mA"
+  [job.select]
+  contacts = "{{CONTACTS}}"
+  kind = "IV"
+  duplicates = "latest"
+
+
+# 線性化 dV/dI 溫度疊圖（log）— 先填好 edges 再把 enabled 改成 true
+[[job]]
+name = "dVdI_vs_T_log"
+type = "dvdi_vs_T"
+enabled = false
+scale = "log"
+offset_step = 2
+edges = [
+  # [T, 負側 uA, 正側 uA]，中間溫度自動內插
+  [1.6, -870, 950],
+  [2.8, -666, 718],
+]
+  [job.select]
+  contacts = "{{CONTACTS}}"
+  kind = "IV"
+  T_range = {{TRANGE}}
+  duplicates = "latest"
+
+
+# IV 二次微分四個轉折點 + Ic vs T
+[[job]]
+name = "IV_transitions_vs_T"
+type = "iv_transitions"
+enabled = false
+initial_guess_mA = [-0.85, -0.50, 0.53, 0.92]
+  [job.select]
+  contacts = "{{CONTACTS}}"
+  kind = "IV"
+  T_range = {{TRANGE}}
+  duplicates = "latest"
+
+
+# 磁場掃描色圖（最新的 2D run）
+[[job]]
+name = "field_map"
+type = "field_map"
+enabled = {{HAS2D}}
+runs = [{{RUN2D}}]
+shift_B0 = true

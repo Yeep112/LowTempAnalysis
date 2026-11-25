@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e3a8a"/>
+      <stop offset="0.5" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+    <radialGradient id="shine" cx="0.22" cy="0.15" r="0.75">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
+    <clipPath id="r"><rect x="16" y="16" width="480" height="480" rx="112"/></clipPath>
+  </defs>
+  <g clip-path="url(#r)">
+    <rect x="16" y="16" width="480" height="480" fill="url(#bg)"/>
+    <rect x="16" y="16" width="480" height="480" fill="url(#shine)"/>
+    <!-- grid -->
+    <g stroke="#ffffff" stroke-opacity="0.08" stroke-width="3">
+      <path d="M96 16V496M176 16V496M336 16V496M416 16V496M16 96H496M16 176H496M16 336H496M16 416H496"/>
+    </g>
+    <!-- axes -->
+    <g stroke="#ffffff" stroke-opacity="0.32" stroke-width="5" stroke-linecap="round">
+      <path d="M72 256H440M256 440V72"/>
+    </g>
+    <!-- snowflake: low temperature -->
+    <g transform="translate(122 124)" stroke="#ffffff" stroke-opacity="0.92" stroke-width="9"
+       stroke-linecap="round" fill="none">
+      <g id="arm"><path d="M0 0V-46M0 -30L-12 -42M0 -30L12 -42"/></g>
+      <use href="#arm" transform="rotate(60)"/><use href="#arm" transform="rotate(120)"/>
+      <use href="#arm" transform="rotate(180)"/><use href="#arm" transform="rotate(240)"/>
+      <use href="#arm" transform="rotate(300)"/>
+    </g>
+    <!-- IV curve: superconducting step -->
+    <path d="M92 410L178 342V256H334V170L420 102" fill="none" stroke="#67e8f9" stroke-opacity="0.75"
+          stroke-width="34" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+    <path d="M92 410L178 342V256H334V170L420 102" fill="none" stroke="#ffffff"
+          stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- transition point marker -->
+    <circle cx="334" cy="170" r="25" fill="#5eead4" stroke="#ffffff" stroke-width="9"/>
+  </g>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="3"/>
+</svg>
