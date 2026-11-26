@@ -10,6 +10,41 @@ DEFAULT_STYLE = dict(grid=True, xlabel=12, ylabel=12, cbar=12, ticks=10, legend=
 SIZE_MODES = ["填滿視窗", "固定大小"]
 LAYOUTS = ["左右並排（可捲動）", "上下排列（可捲動）", "縮放填滿視窗"]
 
+# 存圖大小（跟畫面上看到的大小分開）：(選單文字, (寬 cm, 高 cm)) ；None = 跟畫面一樣
+EXPORT_PRESETS = [("同畫面大小", None),
+                  ("8.5 × 6 cm（論文單欄）", (8.5, 6.0)),
+                  ("17 × 12 cm（論文雙欄）", (17.0, 12.0)),
+                  ("12 × 9 cm", (12.0, 9.0))]
+EXPORT_FONTS = ["同畫面", "6 pt", "7 pt", "8 pt", "9 pt", "10 pt", "12 pt"]
+DEFAULT_EXPORT = dict(mode="screen", w_cm=8.5, h_cm=6.0, font="8 pt")
+
+
+def export_cfg(gui_settings):
+    ex = {**DEFAULT_EXPORT, **((gui_settings or {}).get("export") or {})}
+    try:
+        ex["w_cm"] = min(max(float(ex["w_cm"]), 2.0), 100.0)
+        ex["h_cm"] = min(max(float(ex["h_cm"]), 2.0), 100.0)
+    except (TypeError, ValueError):
+        ex["w_cm"], ex["h_cm"] = DEFAULT_EXPORT["w_cm"], DEFAULT_EXPORT["h_cm"]
+    if ex.get("font") not in EXPORT_FONTS:
+        ex["font"] = DEFAULT_EXPORT["font"]
+    return ex
+
+
+def export_label(ex):
+    """選單上顯示的文字。"""
+    if ex.get("mode") != "fixed":
+        return EXPORT_PRESETS[0][0]
+    for label, size in EXPORT_PRESETS[1:]:
+        if size == (ex["w_cm"], ex["h_cm"]):
+            return label
+    return f"{ex['w_cm']:g} × {ex['h_cm']:g} cm"
+
+
+def export_font_pt(ex):
+    f = ex.get("font", "同畫面")
+    return None if f == "同畫面" else float(f.split()[0])
+
 # 介面上的欄位：(key, 標籤)
 FIELDS = [("xlabel", "X 標籤"), ("ylabel", "Y 標籤"), ("cbar", "色條標籤"),
           ("ticks", "刻度"), ("legend", "圖例"), ("title", "標題")]

@@ -308,7 +308,8 @@ def _report_callback(root):
             pass
         try:
             from tkinter import messagebox
-            messagebox.showerror(APP_NAME, f"發生錯誤：{val}\n\n詳細記錄：{log}", parent=root)
+            messagebox.showerror(APP_NAME, f"發生錯誤：{val}\n\n詳細記錄：{log}\n\n"
+                                 "要回報給維護者：⚙ 設定 → 更新 →「📦 打包錯誤記錄」", parent=root)
         except Exception:
             pass
     return handler

@@ -481,6 +481,12 @@ class SettingsDialog:
         ttk.Button(row, text="立即檢查更新", style="Ghost.TButton",
                    command=lambda: self.app.check_update(manual=True)).pack(side="left")
         ttk.Button(row, text="還原上一版", style="Ghost.TButton", command=self._rollback).pack(side="left", padx=6)
+        rrow = tk.Frame(f, bg=T.CARD)
+        rrow.pack(fill="x", pady=(0, 4))
+        ttk.Button(rrow, text="📦 打包錯誤記錄", style="Ghost.TButton", command=self._bug_report).pack(side="left")
+        tk.Label(rrow, text="軟體出錯或閃退時按這裡：把錯誤記錄與環境資訊壓成一個 zip（不含量測資料），\n"
+                 "再用 Email / Teams / LINE 傳給維護者。", bg=T.CARD, fg=T.MUTED, justify="left",
+                 font=T.font(9)).pack(side="left", padx=10)
         if updater.is_dev_folder():
             prow = tk.Frame(f, bg=T.CARD)
             prow.pack(fill="x", pady=(2, 4))
@@ -510,6 +516,9 @@ class SettingsDialog:
         tk.Label(f, text="更新時會先把目前的程式備份到工具資料夾的 _backup\\（保留最近 3 份）；"
                  "設定、jobs 裡的設定檔、資料總表都不會被覆蓋。", bg=T.CARD, fg=T.FAINT,
                  font=T.font(9), wraplength=T.px(700), justify="left").pack(anchor="w", pady=(6, 0))
+
+    def _bug_report(self):
+        self.app.bug_report(parent=self.win)
 
     def _rollback(self):
         from .. import updater

@@ -312,6 +312,7 @@ class App:
 
         self.root.bind("<F5>", lambda e: self.refresh())
         self.root.bind("<Control-s>", lambda e: self.save_figure())
+        self.root.bind("<Control-S>", lambda e: self.edit_export())     # Ctrl+Shift+S：改大小再存
         self.root.bind("<Control-z>", self.undo)
         self.root.bind("<Control-y>", self.redo)
         self.root.bind("<Control-Z>", self.redo)
@@ -478,6 +479,15 @@ class App:
         self.autoplot_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(disp, text="選取或改參數時自動重畫", variable=self.autoplot_var).grid(
             row=1, column=0, columnspan=6, sticky="w", pady=(6, 0))
+        exr = tk.Frame(disp, bg=T.CARD)
+        exr.grid(row=2, column=0, columnspan=6, sticky="w", pady=(6, 0))
+        tk.Label(exr, text="存圖大小", bg=T.CARD, fg=T.MUTED, font=T.font(9)).pack(side="left", padx=(0, 4))
+        self.export_var = tk.StringVar()
+        self.export_cb = ttk.Combobox(exr, textvariable=self.export_var, state="readonly", width=20)
+        self.export_cb.pack(side="left")
+        self.export_cb.bind("<<ComboboxSelected>>", self._on_export_choice)
+        ttk.Button(exr, text="⚙ 存圖設定", style="Small.TButton", command=self.edit_export).pack(side="left", padx=(6, 0))
+        self._refresh_export_choice()
 
         btn = tk.Frame(prm, bg=T.CARD)
         btn.pack(side="bottom", fill="x", pady=(8, 0), before=disp)
@@ -708,7 +718,8 @@ class App:
         """滑鼠下面的圖例 → (legend, axes) 或 None。"""
         if event.x is None:
             return None
-        for ax in self.fig.axes:
+        fig = getattr(getattr(event, "canvas", None), "figure", None) or self.fig
+        for ax in fig.axes:
             leg = ax.get_legend()
             if leg is None or not leg.get_visible():
                 continue
@@ -903,7 +914,9 @@ class App:
         self.style_vars["fig_w"].set(str(w))
         self.style_vars["fig_h"].set(str(h))
         self.style_vars["size_mode"].set(ST.SIZE_MODES[1])
-        self.status(f"圖的大小固定為 {w} × {h} px（存圖也是這個大小）", "ok")
+        ex = ST.export_cfg(self.gui_settings)
+        note = "存圖也是這個比例" if ex["mode"] != "fixed" else f"存圖仍用「{ST.export_label(ex)}」"
+        self.status(f"圖的大小固定為 {w} × {h} px（{note}）", "ok")
 
     def _panel_need(self):
         """這張圖需要的最小像素大小 (寬, 高)；0 = 跟視窗一樣大。固定大小時就是設定的大小。"""
@@ -2390,6 +2403,53 @@ class App:
             self.check_update()
         self.root.after(self.UPDATE_INTERVAL_MS, self._periodic_update_check)
 
+    def bug_report(self, parent=None):
+        """📦 打包錯誤記錄（error.log、crash.log、app.log、環境資訊），存成 zip 傳給維護者。"""
+        from .. import bugreport
+        parent = parent or self.root
+        win = tk.Toplevel(parent)
+        win.title("打包錯誤記錄")
+        win.configure(bg=T.CARD)
+        win.transient(parent)
+        tk.Label(win, text="會把錯誤記錄、閃退記錄、一般輸出與軟體 / Python 版本壓成一個 zip。\n"
+                 "不含任何 .db 量測資料；會包含資料夾路徑與介面設定。", bg=T.CARD, fg=T.MUTED,
+                 font=T.font(9), justify="left").pack(anchor="w", padx=12, pady=(10, 4))
+        tk.Label(win, text="發生了什麼事？（可留空，例如「開 quad_002 時整個關掉」）", bg=T.CARD, fg=T.TEXT,
+                 font=T.font(10)).pack(anchor="w", padx=12)
+        note = tk.Text(win, height=4, width=60, wrap="word", relief="solid", borderwidth=1,
+                       bg=T.TEXT_BG, fg=T.TEXT, font=T.font(10))
+        note.pack(fill="both", expand=True, padx=12, pady=4)
+
+        def go():
+            path = filedialog.asksaveasfilename(parent=win, title="存放錯誤記錄", initialdir=bugreport.default_dir(),
+                                                initialfile=bugreport.default_name(), defaultextension=".zip",
+                                                filetypes=[("ZIP", "*.zip")])
+            if not path:
+                return
+            a = self.current.get(self.category) if isinstance(getattr(self, "current", None), dict) else None
+            extra = {"資料庫": getattr(self.db, "path", "") if self.db else "（未開啟）",
+                     "頁面": getattr(self, "category", ""),
+                     "功能": getattr(a, "name", ""),
+                     "選取的 run": ", ".join(self.tree.selection()) if getattr(self, "tree", None) else "",
+                     "狀態列": self.status_var.get() if getattr(self, "status_var", None) else ""}
+            try:
+                path, files = bugreport.make_report(path, extra=extra, note=note.get("1.0", "end"))
+            except Exception as e:
+                messagebox.showerror("打包錯誤記錄", f"打包失敗：{e}", parent=win)
+                return
+            win.destroy()
+            self.status(f"已打包錯誤記錄：{path}", "ok")
+            bugreport.reveal(path)
+            messagebox.showinfo("打包錯誤記錄", f"已存到：\n{path}\n\n內容：{'、'.join(files)}\n\n"
+                                "請把這個 zip 用 Email / Teams / LINE 傳給維護者。", parent=parent)
+        bf = tk.Frame(win, bg=T.CARD)
+        bf.pack(fill="x", padx=12, pady=10)
+        ttk.Button(bf, text="打包並存檔…", style="Accent.TButton", command=go).pack(side="right")
+        ttk.Button(bf, text="取消", style="Ghost.TButton", command=win.destroy).pack(side="left")
+        win._go = go
+        win._note = note
+        return win
+
     def check_update(self, manual=False):
         """背景檢查 GitHub 上有沒有新版本。"""
         if self._dead:
@@ -2765,6 +2825,7 @@ class App:
                     self.canvas.mpl_disconnect(cid)
                 self._click_cid = None
             res = self._render(self.fig, a, items, params)
+            self._restore_cuts(res, a, items)
             self._relayout_panels()
             self._apply_labels(a)
             ST.apply_style(self.fig, self.plot_style)
@@ -2781,9 +2842,7 @@ class App:
             self.result, self.last_items = res, items
             if res.on_click:
                 h = self._wrap_click(res.on_click, self.toolbar)
-                events = ("button_press_event", "motion_notify_event", "button_release_event") \
-                    if getattr(res.on_click, "full_events", False) else ("button_press_event",)
-                self._click_cid = [self.canvas.mpl_connect(ev, h) for ev in events]
+                self._click_cid = [self.canvas.mpl_connect(ev, h) for ev in self._click_events(res.on_click)]
             ids = ", ".join(str(it.run_id) for it in items)
             self._set_text(f"{a.icon} {a.name}  ·  run {ids}", res.text)
             self._hl_orig = {}
@@ -2830,18 +2889,51 @@ class App:
         except tk.TclError:
             pass
 
-    def _wrap_click(self, handler, toolbar):
+    def _wrap_click(self, handler, toolbar, hover=None):
         def on_click(event):
+            hv = hover or self.hover
             if str(getattr(toolbar, "mode", "")):
                 return
             if event.name == "button_press_event":
                 if self._legend_at(event) is not None:
                     return
-                self.hover.paused = event.button == 1 and getattr(handler, "full_events", False)
+                hv.paused = event.button == 1 and getattr(handler, "full_events", False)
             elif event.name == "button_release_event":
-                self.hover.paused = False
+                hv.paused = False
             handler(event)
         return on_click
+
+    @staticmethod
+    def _click_events(handler):
+        return ("button_press_event", "motion_notify_event", "button_release_event") \
+            if getattr(handler, "full_events", False) else ("button_press_event",)
+
+    # ------------------------------------------------------------------ 記住 2D 切線位置
+    @staticmethod
+    def _cuts_key(a, items):
+        return f"{a.name}|" + ",".join(str(it.run_id) for it in items)
+
+    def _restore_cuts(self, res, a, items):
+        """2D 色圖：換回這個功能、這筆資料上次的切線位置，並在切線改變時記下來。"""
+        oc = getattr(res, "on_click", None)
+        if oc is None or not hasattr(oc, "set_cuts"):
+            return
+        key = self._cuts_key(a, items)
+        saved = (self._view.get("cuts") or {}).get(key)
+        if saved is not None:
+            try:
+                oc.set_cuts(saved)
+            except Exception:
+                pass
+        oc.changed = lambda xs, key=key: self._cuts_changed(key, xs)
+
+    def _cuts_changed(self, key, xs):
+        cuts = self._view.setdefault("cuts", {})
+        cuts.pop(key, None)
+        cuts[key] = [round(float(x), 9) for x in xs]
+        while len(cuts) > 300:                 # 只留最近的
+            cuts.pop(next(iter(cuts)))
+        self._schedule_view_save()
 
     def _welcome(self):
         """還沒選資料時的引導畫面。"""
@@ -2912,8 +3004,171 @@ class App:
         if not path:
             return
         self.hover._hide_all()
-        self.fig.savefig(path, dpi=int(self.settings.get("dpi", 300)), bbox_inches="tight")
-        self.status(f"已存圖：{path}", "ok")
+        try:
+            how = self._export_figure(self.fig, path)
+        except Exception as e:
+            traceback.print_exc()
+            messagebox.showerror("存圖", f"存圖失敗：{e}")
+            return
+        self.canvas.draw_idle()
+        self.status(f"已存圖（{how}）：{path}", "ok")
+
+    # ------------------------------------------------------------------ 存圖大小
+    def _export_figure(self, fig, path, ex=None):
+        """依「存圖大小」存檔；回傳說明文字。畫面上的圖不受影響。"""
+        ex = ex or ST.export_cfg(self.gui_settings)
+        dpi = int(self.settings.get("dpi", 300))
+        if ex["mode"] != "fixed":
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+            return f"同畫面大小，{dpi} dpi"
+        import matplotlib.text as mtext
+        old_size = fig.get_size_inches().copy()
+        pt = ST.export_font_pt(ex)
+        texts, ticks, lines, tick_lw = [], [], [], []
+        if pt:
+            scale = pt / float(self.plot_style.get("xlabel", 12) or 12)
+            for t in fig.findobj(mtext.Text):
+                texts.append((t, t.get_fontsize()))
+            for ax in fig.axes:
+                for axis in (ax.xaxis, ax.yaxis):
+                    tl = axis.get_ticklabels()
+                    if tl:
+                        ticks.append((axis, tl[0].get_fontsize()))
+            for t, size in texts:
+                t.set_fontsize(size * scale)
+            for axis, size in ticks:
+                axis.set_tick_params(labelsize=size * scale)
+            lw = max(scale, 0.5)                    # 線條、刻度跟著字變細，比例才像畫面上看到的
+            import matplotlib.lines as mlines
+            for ln in fig.findobj(mlines.Line2D):
+                lines.append((ln, ln.get_linewidth(), ln.get_markersize()))
+                ln.set_linewidth(ln.get_linewidth() * lw)
+                ln.set_markersize(ln.get_markersize() * lw)
+            for ax in fig.axes:
+                for sp in ax.spines.values():
+                    lines.append((sp, sp.get_linewidth(), None))
+                    sp.set_linewidth(sp.get_linewidth() * lw)
+                for axis in (ax.xaxis, ax.yaxis):
+                    mt = axis.get_major_ticks()
+                    if mt:
+                        tl = mt[0].tick1line
+                        tick_lw.append((axis, tl.get_markersize(), tl.get_markeredgewidth()))
+                        axis.set_tick_params(length=tl.get_markersize() * lw, width=tl.get_markeredgewidth() * lw)
+        try:
+            fig.set_size_inches(ex["w_cm"] / 2.54, ex["h_cm"] / 2.54, forward=False)
+            fig.savefig(path, dpi=dpi)             # 不用 tight：輸出就是指定的大小
+        finally:
+            for t, size in texts:
+                t.set_fontsize(size)
+            for axis, size in ticks:
+                axis.set_tick_params(labelsize=size)
+            for art, w, ms in lines:
+                art.set_linewidth(w)
+                if ms is not None:
+                    art.set_markersize(ms)
+            for axis, length, width in tick_lw:
+                axis.set_tick_params(length=length, width=width)
+            fig.set_size_inches(old_size, forward=False)
+        font = f"字 {pt:g} pt，" if pt else ""
+        return f"{ex['w_cm']:g} × {ex['h_cm']:g} cm，{font}{dpi} dpi"
+
+    def _refresh_export_choice(self):
+        ex = ST.export_cfg(self.gui_settings)
+        cur = ST.export_label(ex)
+        values = [label for label, _ in ST.EXPORT_PRESETS]
+        if cur not in values:
+            values.append(cur)
+        values.append("自訂大小…")
+        try:
+            self.export_cb.configure(values=values)
+            self.export_var.set(cur)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _set_export(self, **kw):
+        ex = ST.export_cfg(self.gui_settings)
+        ex.update(kw)
+        self.gui_settings["export"] = ex
+        ST.save_settings(self.gui_settings)
+        self._refresh_export_choice()
+
+    def _on_export_choice(self, event=None):
+        choice = self.export_var.get()
+        if choice == "自訂大小…":
+            self._refresh_export_choice()
+            self.edit_export()
+            return
+        for label, size in ST.EXPORT_PRESETS:
+            if label == choice:
+                if size is None:
+                    self._set_export(mode="screen")
+                else:
+                    self._set_export(mode="fixed", w_cm=size[0], h_cm=size[1])
+                break
+        ex = ST.export_cfg(self.gui_settings)
+        self.status(f"之後存圖使用：{ST.export_label(ex)}" + ("" if ex["mode"] != "fixed" else f"（字 {ex['font']}）"), "ok")
+
+    def edit_export(self):
+        """⚙ 存圖設定：存檔的寬、高（cm）與字體大小；可以「確定並存圖」。"""
+        ex = ST.export_cfg(self.gui_settings)
+        win = tk.Toplevel(self.root)
+        win.title("存圖設定")
+        win.configure(bg=T.CARD)
+        win.transient(self.root)
+        tk.Label(win, text="存檔的大小可以和畫面上看到的不同，例如畫面上看大圖、存成論文用的 8.5 × 6 cm。\n"
+                 "畫面上的圖不會改變；這個設定會記住，之後按「⬇ 存圖」或 Ctrl+S 都用這個大小。",
+                 bg=T.CARD, fg=T.MUTED, font=T.font(9), justify="left").pack(anchor="w", padx=12, pady=(10, 6))
+        body = tk.Frame(win, bg=T.CARD)
+        body.pack(fill="x", padx=12)
+        mode = tk.StringVar(value=ex["mode"])
+        ttk.Radiobutton(body, text="跟畫面上的圖一樣（自動裁掉空白）", value="screen", variable=mode).grid(
+            row=0, column=0, columnspan=4, sticky="w")
+        ttk.Radiobutton(body, text="指定大小", value="fixed", variable=mode).grid(row=1, column=0, columnspan=4,
+                                                                             sticky="w", pady=(4, 0))
+        w_var, h_var = tk.StringVar(value=f"{ex['w_cm']:g}"), tk.StringVar(value=f"{ex['h_cm']:g}")
+        for col, (lab, var) in enumerate((("寬", w_var), ("高", h_var))):
+            tk.Label(body, text=lab, bg=T.CARD, fg=T.TEXT).grid(row=2, column=2 * col, sticky="e", padx=(18 if col == 0 else 10, 4))
+            sp = ttk.Spinbox(body, from_=2, to=100, increment=0.5, width=7, textvariable=var)
+            sp.grid(row=2, column=2 * col + 1, sticky="w")
+            sp.bind("<FocusIn>", lambda e: mode.set("fixed"))
+        tk.Label(body, text="cm", bg=T.CARD, fg=T.MUTED).grid(row=2, column=4, sticky="w", padx=4)
+        pre = tk.Frame(body, bg=T.CARD)
+        pre.grid(row=3, column=0, columnspan=5, sticky="w", padx=(18, 0), pady=4)
+        for label, size in ST.EXPORT_PRESETS[1:]:
+            ttk.Button(pre, text=label.split("（")[0], style="Small.TButton",
+                       command=lambda s=size: (w_var.set(f"{s[0]:g}"), h_var.set(f"{s[1]:g}"), mode.set("fixed"))
+                       ).pack(side="left", padx=(0, 4))
+        tk.Label(body, text="字體大小", bg=T.CARD, fg=T.TEXT).grid(row=4, column=0, columnspan=2, sticky="w", padx=(18, 0), pady=(6, 0))
+        font_var = tk.StringVar(value=ex["font"])
+        ttk.Combobox(body, textvariable=font_var, values=ST.EXPORT_FONTS, state="readonly", width=8).grid(
+            row=4, column=2, columnspan=2, sticky="w", pady=(6, 0))
+        tk.Label(body, text="（軸標籤的大小，其他文字等比例縮放；論文單欄常用 7–9 pt）", bg=T.CARD, fg=T.FAINT,
+                 font=T.font(9)).grid(row=5, column=0, columnspan=5, sticky="w", padx=(18, 0))
+        tk.Label(body, text=f"解析度：{int(self.settings.get('dpi', 300))} dpi（在 ⚙ 設定 → 資料與輸出 修改）",
+                 bg=T.CARD, fg=T.MUTED, font=T.font(9)).grid(row=6, column=0, columnspan=5, sticky="w", pady=(8, 0))
+
+        def apply(save=False):
+            try:
+                w, h = float(w_var.get()), float(h_var.get())
+                if not (2 <= w <= 100 and 2 <= h <= 100):
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("存圖設定", "寬和高請輸入 2–100 之間的數字（cm）", parent=win)
+                return
+            self._set_export(mode=mode.get(), w_cm=w, h_cm=h, font=font_var.get())
+            win.destroy()
+            if save:
+                self.save_figure()
+            else:
+                ex2 = ST.export_cfg(self.gui_settings)
+                self.status(f"之後存圖使用：{ST.export_label(ex2)}", "ok")
+        bf = tk.Frame(win, bg=T.CARD)
+        bf.pack(fill="x", padx=12, pady=10)
+        ttk.Button(bf, text="確定並存圖…", style="Accent.TButton", command=lambda: apply(True)).pack(side="right")
+        ttk.Button(bf, text="確定", style="Ghost.TButton", command=apply).pack(side="right", padx=6)
+        ttk.Button(bf, text="取消", style="Ghost.TButton", command=win.destroy).pack(side="left")
+        win._apply = apply
+        return win
 
     def export_csv(self):
         if self.result is None or not self.result.export:
@@ -2961,9 +3216,12 @@ class App:
         win._lta_hover = Hover(canvas)
         try:
             res = self._render(fig, a, self.last_items, self._params())
+            self._restore_cuts(res, a, self.last_items)
             ST.apply_style(fig, self.plot_style)
             if res.on_click:
-                canvas.mpl_connect("button_press_event", self._wrap_click(res.on_click, tb))
+                h = self._wrap_click(res.on_click, tb, win._lta_hover)
+                for ev in self._click_events(res.on_click):
+                    canvas.mpl_connect(ev, h)
             canvas.draw()
             state["lim"] = self._remember_view(fig)
         except Exception as e:

@@ -209,6 +209,15 @@ def cmd_diag(a, settings):
         print(f"更新來源      讀取失敗：{e}")
 
 
+def cmd_report(a, settings):
+    from . import bugreport
+    path, files = bugreport.make_report()
+    print(f"已打包錯誤記錄：{path}")
+    print("  內容：" + "、".join(files))
+    print("請把這個 zip 傳給維護者（不含任何量測資料）。")
+    bugreport.reveal(path)
+
+
 def cmd_update(a, settings):
     from . import updater
     info = updater.check()
@@ -432,6 +441,7 @@ def main(argv=None):
     sub.add_parser("types")
     sub.add_parser("menu")
     sub.add_parser("diag")
+    sub.add_parser("report", help="打包錯誤記錄（傳給維護者）")
     s = sub.add_parser("update"); s.add_argument("-y", "--yes", action="store_true")
     s = sub.add_parser("release", help="發佈新版本（開發者用）")
     s.add_argument("version", nargs="?"); s.add_argument("-n", "--notes", nargs="*", default=None)
@@ -460,7 +470,7 @@ def main(argv=None):
     {"catalog": cmd_catalog, "list": cmd_list, "quick": cmd_quick, "run": cmd_run,
      "run-all": cmd_run_all, "new": cmd_new, "types": cmd_types,
      "menu": cmd_menu, "open": cmd_open, "gui": cmd_gui, "app": cmd_gui, "shortcut": cmd_install,
-     "install": cmd_install, "uninstall": cmd_uninstall, "diag": cmd_diag,
+     "install": cmd_install, "uninstall": cmd_uninstall, "diag": cmd_diag, "report": cmd_report,
      "update": cmd_update, "release": cmd_release, "publish": cmd_publish,
      "selftest": cmd_selftest}[a.cmd](a, settings)
 

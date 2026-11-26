@@ -163,7 +163,7 @@ def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_li
         return None
 
     X_axis = X[:, 0]
-    state = {"lines": [], "marks": [], "n": 0}
+    state = {"lines": [], "marks": [], "xs": [], "n": 0}
     palette = colormaps["tab10"]
     ax_cut.set_xlabel(yl)
     ax_cut.set_ylabel(zl)
@@ -174,6 +174,7 @@ def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_li
         state["n"] += 1
         ln, = ax_cut.plot(Y[i], Z[i], color=c, lw=1.3, label=f"{X_axis[i]:+.4g}")
         state["lines"].append(ln)
+        state["xs"].append(float(X_axis[i]))
         if cut_marks:
             state["marks"].append(ax.axvline(X_axis[i], color=c, lw=1.4, gid="nohover"))
         ax_cut.relim()
@@ -183,7 +184,7 @@ def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_li
     def clear():
         for a in state["lines"] + state["marks"]:
             a.remove()
-        state.update(lines=[], marks=[], n=0)
+        state.update(lines=[], marks=[], xs=[], n=0)
         leg = ax_cut.get_legend()
         if leg:
             leg.remove()
@@ -209,6 +210,7 @@ def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_li
     def move_cut(k, x):
         i = int(np.argmin(np.abs(X_axis - x)))
         state["marks"][k].set_xdata([X_axis[i], X_axis[i]])
+        state["xs"][k] = float(X_axis[i])
         ln = state["lines"][k]
         ln.set_data(Y[i], Z[i])
         ln.set_label(f"{X_axis[i]:+.4g}")
@@ -238,6 +240,7 @@ def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_li
             if event.button == 3:
                 clear()
                 canvas.draw_idle()
+                notify()
                 return
             if event.button != 1:
                 return
@@ -282,13 +285,35 @@ def map_with_cut(fig, X, Y, Z, labels, cmap, vlim, cut=True, title="", origin_li
                     art.set_animated(False)
                 refresh_legend()
                 canvas.draw_idle()
+                notify()
                 return
             if abs(event.x - press["x"]) <= 6 and abs(event.y - press["y"]) <= 6:   # 點一下 → 加切線
                 add_cut(press["xdata"])
                 canvas.draw_idle()
+                notify()
+
+    def notify():
+        cb = getattr(on_mouse, "changed", None)
+        if cb is not None:
+            try:
+                cb(list(state["xs"]))
+            except Exception:
+                pass
+
+    def set_cuts(xs):
+        """換成指定的切線位置（介面用來還原上次的切線；空清單 = 沒有切線）。"""
+        clear()
+        for x in xs:
+            try:
+                add_cut(float(x))
+            except (TypeError, ValueError):
+                pass
 
     on_mouse.full_events = True        # 介面會把按下、移動、放開都交給它
     on_mouse.drag_ax = ax
+    on_mouse.get_cuts = lambda: list(state["xs"])
+    on_mouse.set_cuts = set_cuts
+    on_mouse.changed = None            # 介面設定：切線改變時呼叫 changed([x, …])，用來記住位置
     return on_mouse
 
 

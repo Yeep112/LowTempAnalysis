@@ -36,6 +36,7 @@ if /i "%ARG%"=="uninstall" goto uninstall
 if /i "%ARG%"=="update" goto update
 if /i "%ARG%"=="diag" goto diag
 if /i "%ARG%"=="publish" goto publish
+if /i "%ARG%"=="report" goto report
 if /i "%~x1"==".db" goto guidb
 "%PYEXE%" -m lta open "%~1"
 pause
@@ -70,6 +71,11 @@ exit /b
 
 :diag
 "%PYEXE%" -m lta diag
+pause
+exit /b
+
+:report
+"%PYEXE%" -m lta report
 pause
 exit /b
 

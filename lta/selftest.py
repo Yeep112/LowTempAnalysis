@@ -249,7 +249,14 @@ runs = {runs['map']}
     rep.check("批次分析", go)
 
 
-def run_gui(db_path, runs, rep, timeout=60):
+def _png_size(path):
+    import struct
+    with open(path, "rb") as f:
+        head = f.read(24)
+    return struct.unpack(">II", head[16:24])
+
+
+def run_gui(db_path, runs, rep, timeout=60, out=None):
     try:
         import tkinter as tk
         root = tk.Tk()
@@ -301,6 +308,14 @@ def run_gui(db_path, runs, rep, timeout=60):
                         raise RuntimeError(f"{a.name}：{status}")
                     done.append(a.name)
             app.undo(); app.redo()
+            if out:                                   # 存圖：指定 8.5 × 6 cm，畫面上的圖大小不能變
+                before = tuple(app.fig.get_size_inches())
+                path = os.path.join(out, "export.png")
+                app._export_figure(app.fig, path, ex=dict(mode="fixed", w_cm=8.5, h_cm=6.0, font="8 pt"))
+                w, h = _png_size(path)
+                dpi = int(app.settings.get("dpi", 300))
+                assert abs(w - 8.5 / 2.54 * dpi) <= 3 and abs(h - 6 / 2.54 * dpi) <= 3, (w, h)
+                assert tuple(app.fig.get_size_inches()) == before, "存圖後畫面大小改變了"
             return f"畫了 {len(done)} 個功能"
         finally:
             try:
@@ -369,8 +384,17 @@ def main(gui=True, log=print):
         rep.check("讀取資料庫", detect)
         run_analyses(db, runs, rep)
         run_batch(db_path, runs, rep, tmp)
+
+        def report():
+            from . import bugreport
+            import zipfile
+            path, files = bugreport.make_report(os.path.join(tmp, "report.zip"), extra={"測試": "selftest"})
+            names = zipfile.ZipFile(path).namelist()
+            assert "環境資訊.txt" in names, names
+            return f"{len(names)} 個檔案"
+        rep.check("打包錯誤記錄", report)
         if gui:
-            run_gui(db_path, runs, rep)
+            run_gui(db_path, runs, rep, out=tmp)
     finally:
         if old_local is None:
             os.environ.pop("LOCALAPPDATA", None)
