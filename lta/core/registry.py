@@ -25,7 +25,7 @@ import pkgutil
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .measurement import MODES
+from .measurement import CONDITIONS, MODES
 
 ANALYSES: dict[str, list] = {"1D": [], "2D": []}
 CATEGORY_PACKAGES = {"1D": "lta.analysis1d", "2D": "lta.analysis2d"}
@@ -42,6 +42,7 @@ class P:
     tip: str = ""
     per_item: bool = False      # True = 每筆 run 可以有自己的值（介面會出現逐筆設定表）
     lines: int = 1              # 文字參數 > 1 時顯示成多行文字框
+    conditions: tuple | None = None   # 只對某些外加條件顯示，例如 ("field",)；None = 都顯示
 
     @property
     def kind(self):
@@ -96,6 +97,8 @@ class Analysis:
     store: str | None = None    # 設定群組：同群組的分析共用參數值與逐筆設定（預設 = 自己的名稱）
     compute: Callable | None = None   # (items, p, progress) -> data：在背景執行的計算，結果放在 p["_data"]
     progressive: bool = False   # True = 計算中可以先畫已完成的那幾筆
+    conditions: tuple | None = None   # 適用的外加條件 field / gate / none；None = 全部
+    family: str | None = None   # 同一種分析在不同外加條件的版本（例如 Ic vs B 與 Ic vs Vg）用同一個名字
 
     @property
     def store_key(self):
@@ -112,6 +115,20 @@ class Analysis:
     def supports(self, mode):
         return self.modes is None or mode in self.modes
 
+    def supports_condition(self, cond):
+        return self.conditions is None or cond in self.conditions
+
+    def accepts(self, info):
+        """這筆 run（RunInfo）能不能用這個功能分析：量測模式 + 外加條件。"""
+        return self.supports(info.mode) and self.supports_condition(info.condition)
+
+    @property
+    def conditions_text(self):
+        if self.conditions is None:
+            return "所有外加條件"
+        return "、".join(f"{CONDITIONS[c]['icon']} {CONDITIONS[c]['short']}" for c in self.conditions
+                        if c in CONDITIONS)
+
     @property
     def modes_text(self):
         if self.modes is None:
@@ -121,7 +138,7 @@ class Analysis:
 
 def analysis(category, name, params=None, help="", multi=True, modes=None,
              group="基本", icon="•", order=100, item_defaults=None, store=None, compute=None,
-             progressive=False):
+             progressive=False, conditions=None, family=None):
     """登錄一個分析功能（裝飾器）。
 
     逐筆參數：P(..., per_item=True)。函式收到的 p[key] 是 {run_id: 使用者設定的值}
@@ -132,13 +149,15 @@ def analysis(category, name, params=None, help="", multi=True, modes=None,
     store="另一個分析的名稱"：和那個分析共用參數值與逐筆設定（例如轉折點、Ic 擬合共用線性化的 edge）。
     compute=fn：慢的計算 fn(items, p, progress) 會在背景執行（介面不會卡住、顯示進度），
                 結果放在 p["_data"] 給繪圖函式用；progress(k, n, 說明) 回報進度。
-    progressive=True：計算中先用已完成的那幾筆畫圖（每筆獨立的分析才適合）。"""
+    progressive=True：計算中先用已完成的那幾筆畫圖（每筆獨立的分析才適合）。
+    conditions=("gate",)：只適用某些外加條件（field 磁場、gate 電場、none 無外加）；介面依此分類與擋掉不適用的資料。
+    family="switching"：不同外加條件的同一種分析；選到不適用的資料時介面會自動換成同 family 的版本。"""
     def deco(func):
         lst = ANALYSES[category]
         lst[:] = [a for a in lst if a.name != name]        # 重新載入時不重複
         lst.append(Analysis(category, name, func, params or [], help, multi,
                             tuple(modes) if modes else None, group, icon, order, item_defaults, store,
-                            compute, progressive))
+                            compute, progressive, tuple(conditions) if conditions else None, family))
         lst.sort(key=lambda a: (a.order, a.name))
         return func
     return deco

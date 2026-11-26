@@ -11,7 +11,7 @@ import time
 import numpy as np
 from matplotlib import colormaps
 
-from ..core.measurement import si_scale
+from ..core.measurement import is_field, si_scale
 
 CMAPS = ["magma", "inferno", "viridis", "plasma", "cividis", "hot", "RdBu_r", "coolwarm", "gray"]
 RANGES = ["自動 (1–99%)", "全範圍", "手動"]
@@ -86,6 +86,8 @@ def load_view(it, shift=False, threshold_mV=0.5):
     """讀一筆 2D 資料並縮放；shift=True 且為 I→V 時以切換電流最大處為慢軸原點。"""
     m = it.map2d()
     origin, note = 0.0, ""
+    if shift and not is_field(m.slow.name, m.slow.unit):
+        shift = False                     # B₀ 平移只對磁場資料有意義（閘極電壓等不平移）
     if shift:
         if m.mode != "current_bias":
             note = "（平移原點只適用於快軸施加電流、量電壓的資料，已略過）"
@@ -102,13 +104,32 @@ def load_view(it, shift=False, threshold_mV=0.5):
                 ps, pf, pz, origin, note, m)
 
 
-def derivative_view(v: View):
-    """dZ/dF（相鄰點差分）。回傳 (S, F_mid, D, 標籤, 縮放)，D 為 SI 單位再縮放。"""
+def smooth_rows(Z, window):
+    """沿快軸（每一列）做 Savitzky–Golay 平滑；window < 3 不處理。"""
+    window = int(window or 0)
+    if window < 3 or Z.shape[1] < 5:
+        return Z
+    from scipy.signal import savgol_filter
+    window = min(window + (window % 2 == 0), Z.shape[1] - (Z.shape[1] % 2 == 0))
+    out = Z.copy()
+    ok = np.isfinite(Z).all(axis=1)
+    if ok.any():
+        out[ok] = savgol_filter(Z[ok], window, min(2, window - 1), axis=1)
+    return out
+
+
+def derivative_view(v: View, smooth=0, edge_skip=0):
+    """dZ/dF（相鄰點差分）。回傳 (S, F_mid, D, 標籤, 縮放)，D 為 SI 單位再縮放。
+    smooth：微分前沿快軸平滑的點數；edge_skip：每條掃描頭尾各去掉幾點（避免掃描端點的假尖峰）。"""
     from ..core.measurement import derivative_unit
     m = v.m
     with np.errstate(divide="ignore", invalid="ignore"):
-        D = np.diff(m.z.values, axis=1) / np.diff(m.fast.values, axis=1)
+        D = np.diff(smooth_rows(m.z.values, smooth), axis=1) / np.diff(m.fast.values, axis=1)
     D[~np.isfinite(D)] = np.nan
+    k = int(edge_skip or 0)
+    if k > 0 and D.shape[1] > 2 * k + 2:
+        D[:, :k] = np.nan
+        D[:, -k:] = np.nan
     unit = derivative_unit(m.z.unit, m.fast.unit)
     pd, ud = si_scale(D, unit)
     return (v.S[:, :-1], (v.F[:, :-1] + v.F[:, 1:]) / 2, D / pd,

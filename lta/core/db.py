@@ -18,7 +18,7 @@ from datetime import datetime
 
 import numpy as np
 
-from .measurement import (Axis, Curve, Map2D, detect_mode, order_setpoints,
+from .measurement import (is_field, is_gate, plain, run_condition, Axis, Curve, Map2D, detect_mode, order_setpoints,
                           reshape_grid, symbol)
 
 
@@ -84,7 +84,17 @@ class RunInfo:
             return "?"
         z = symbol(self.measured[0], self.units.get(self.measured[0], ""))
         axes = [symbol(n, self.units.get(n, "")) for n in self.setpoints]
-        return "×".join(axes) + "→" + z
+        return plain("×".join(axes) + "→" + z)
+
+    @property
+    def condition(self):
+        """外加條件：field（磁場）/ gate（電場、閘極）/ none（無外加）。見 measurement.CONDITIONS。"""
+        return run_condition(self.setpoints, self.units)
+
+    @property
+    def gate_params(self):
+        """這筆量測裡的閘極電壓參數（掃描軸）。"""
+        return [n for n in self.setpoints if is_gate(n, self.units.get(n, "")) and not is_field(n, self.units.get(n, ""))]
 
     def as_row(self) -> dict:
         row = asdict(self)

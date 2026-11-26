@@ -168,8 +168,8 @@ def parse_positions(text):
     return [float(x) for x in text.replace("，", ",").split(",") if x.strip()]
 
 
-@analysis("2D", "指定位置切線 + 轉折點", group="萃取", icon="▥", order=110, multi=False,
-          modes=("current_bias",), params=[
+@analysis("2D", "指定位置切線 + 轉折點", group="⊗ 磁場 B", icon="▥", order=110, multi=False,
+          modes=("current_bias",), conditions=("field",), family="cuts", params=[
     P("fields", "切線位置（慢軸顯示單位，例如 mT）", "-1.5:2.1:0.15",
       tip="起:終:間隔，或用逗號列出：-1, 0, 1"),
     P("tol", "最遠距離（空白 = 一律挑最近的資料）", "",

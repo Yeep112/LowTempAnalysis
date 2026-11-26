@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -44,7 +45,71 @@ SYMBOLS = {
 _UNIT_SYMBOL = {"A": "I", "V": "V", "T": "B", "K": "T", "deg": "θ", "Hz": "f", "Ohm": "R"}
 
 
+# ---------------------------------------------------------------------------
+# 外加條件：磁場 / 電場（閘極）/ 無外加 —— 介面用它把資料與功能分成三大類
+# ---------------------------------------------------------------------------
+CONDITIONS = {
+    "field": dict(icon="⊗", short="磁場", label="磁場 B"),
+    "gate":  dict(icon="⚡", short="電場", label="電場（閘極電壓 Vg）"),
+    "none":  dict(icon="○", short="無外加", label="無外加（只有溫度等）"),
+}
+
+# 閘極電壓的來源（電場從樣品哪一側來）。介面「⚡ 閘極設定」可以逐個參數修改。
+GATE_ROLES_INFO = {
+    "bottom": dict(sym="V$_\\mathrm{bottom}$", plain="V_bottom", label="底部閘極 V_bottom（電場來自樣品底部）"),
+    "top":    dict(sym="V$_\\mathrm{top}$", plain="V_top", label="頂部閘極 V_top（電場來自樣品上方）"),
+    "gate":   dict(sym="V$_\\mathrm{g}$", plain="Vg", label="一般閘極 Vg（不區分上下）"),
+}
+DEFAULT_GATE_ROLE = "bottom"
+GATE_ROLES: dict = {}            # 參數名稱 → "bottom" / "top" / "gate"；沒列出的用 DEFAULT_GATE_ROLE
+
+_GATE_RE = re.compile(r"(^|_)(v?tg|v?bg|vg|gate\w*|v_?gate\w*|top_?gate|bottom_?gate|back_?gate)($|_)", re.I)
+
+
+def is_field(name: str, unit: str) -> bool:
+    return name.endswith("_field") or name == "field" or unit == "T"
+
+
+def is_gate(name: str, unit: str = "V") -> bool:
+    """閘極電壓參數：名稱像 appl_TG、appl_BG、gate、Vg…，單位是 V。"""
+    return unit in ("V", "") and bool(_GATE_RE.search(name or ""))
+
+
+def gate_role(name: str) -> str:
+    role = GATE_ROLES.get(name, DEFAULT_GATE_ROLE)
+    return role if role in GATE_ROLES_INFO else DEFAULT_GATE_ROLE
+
+
+def axis_condition(name: str, unit: str):
+    if is_field(name, unit):
+        return "field"
+    if is_gate(name, unit):
+        return "gate"
+    return None
+
+
+def run_condition(setpoints, units) -> str:
+    """一筆量測的外加條件：有磁場掃描軸 → field；有閘極掃描軸 → gate；都沒有 → none。"""
+    conds = {axis_condition(n, (units or {}).get(n, "")) for n in setpoints}
+    if "field" in conds:
+        return "field"
+    if "gate" in conds:
+        return "gate"
+    return "none"
+
+
+def plain(text: str) -> str:
+    """把圖上用的符號（例如 V$_\\mathrm{bottom}$）換成一般文字 V_bottom，給清單、狀態列用。"""
+    if not text or "$" not in text:
+        return text
+    t = re.sub(r"\$_\\mathrm\{([^}]*)\}\$", r"_\1", text)
+    t = re.sub(r"\$_\{?([^}$]*)\}?\$", r"_\1", t)
+    return t.replace("$", "")
+
+
 def symbol(name: str, unit: str) -> str:
+    if is_gate(name, unit) and not is_field(name, unit):
+        return GATE_ROLES_INFO[gate_role(name)]["sym"]
     if name in SYMBOLS:
         return SYMBOLS[name]
     for key, sym in SYMBOLS.items():

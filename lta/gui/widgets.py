@@ -138,6 +138,61 @@ class Segmented(tk.Frame):
                 s.configure(fg=T.FAINT)
 
 
+class ChipBar(tk.Frame):
+    """一排可點選的小標籤（外加條件：全部 / 磁場 / 電場 / 無外加），每個可顯示筆數。"""
+
+    def __init__(self, parent, options, command, accent="1D"):
+        super().__init__(parent, bg=T.CARD)
+        self.command = command
+        self.accent = accent
+        self.active = options[0][0]
+        self.items = {}
+        self.counts = {}
+        for i, (key, text, tip) in enumerate(options):
+            lab = tk.Label(self, text=text, bg=T.CHIP, fg=T.MUTED, font=T.font(9, "bold"), padx=T.px(7),
+                           pady=T.px(3), cursor="hand2")
+            lab.grid(row=0, column=i, sticky="ew", padx=(0, T.px(3)))
+            self.columnconfigure(i, weight=1)
+            lab.bind("<Button-1>", lambda e, k=key: self.select(k))
+            lab.bind("<Enter>", lambda e, k=key: self._hover(k, True))
+            lab.bind("<Leave>", lambda e, k=key: self._hover(k, False))
+            self.items[key] = dict(label=lab, text=text, tip=tip, enabled=True)
+        self.paint()
+
+    def _hover(self, key, inside):
+        it = self.items[key]
+        if key != self.active and it["enabled"]:
+            it["label"].configure(bg=T.HOVER if inside else T.CHIP)
+
+    def select(self, key, notify=True):
+        if key not in self.items:
+            return
+        changed = key != self.active
+        self.active = key
+        self.paint()
+        if notify and changed:
+            self.command(key)
+
+    def set_counts(self, counts):
+        """counts: key -> 筆數（None = 不顯示數字）。0 筆的分類變淡，但還是可以點。"""
+        self.counts = dict(counts)
+        self.paint()
+
+    def set_accent(self, accent):
+        self.accent = accent
+        self.paint()
+
+    def paint(self):
+        acc = T.ACCENTS.get(self.accent, next(iter(T.ACCENTS.values())))
+        for key, it in self.items.items():
+            n = self.counts.get(key)
+            text = it["text"] + (f" {n}" if n is not None else "")
+            on = key == self.active
+            it["enabled"] = n is None or n > 0 or on
+            it["label"].configure(text=text, bg=acc["main"] if on else T.CHIP,
+                                  fg=acc.get("on", "#ffffff") if on else (T.MUTED if it["enabled"] else T.BORDER))
+
+
 class FeatureList(tk.Frame):
     """依分組列出分析功能的卡片清單。"""
 

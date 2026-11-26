@@ -1,12 +1,13 @@
-"""切換電流 vs 慢軸：每個慢軸位置（磁場、閘極…）從 I=0 往外走，|V − V(0)| 超過門檻前的電流。"""
+"""切換電流 vs 磁場：每個磁場從 I=0 往外走，|V − V(0)| 超過門檻前的電流。
+（閘極電壓的版本在 gate.py：「Ic vs Vg（切換電流）」，兩者 family="switching"。）"""
 import numpy as np
 
 from ..core.registry import P, Result, analysis
 from ._common import CMAPS, RANGES, load_view, add_map, color_limits, switching_current
 
 
-@analysis("2D", "切換電流 Ic vs 慢軸", group="萃取", icon="↯", order=100, multi=False,
-          modes=("current_bias",), params=[
+@analysis("2D", "切換電流 Ic vs B（磁場）", store="切換電流 Ic vs 慢軸", group="⊗ 磁場 B", icon="↯", order=100, multi=False,
+          modes=("current_bias",), conditions=("field",), family="switching", params=[
     P("thr", "切換門檻 |V − V(0)| (mV)", 0.5),
     P("shift", "以切換電流最大處為慢軸原點（B₀）", True),
     P("negative", "也算負向 Ic−", True),

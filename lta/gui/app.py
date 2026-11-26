@@ -28,7 +28,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 
 from ..core.db import QDB
 from ..core.common import fmt_T, safe_name, ensure_dir
-from ..core.measurement import MODES
+from ..core import measurement as M
+from ..core.measurement import MODES, CONDITIONS
 from ..core.registry import load_analyses, Item, Drag, group_params
 from ..batch.runner import load_settings, TOOL_ROOT
 from ..catalog import find_dbs, db_mtime
@@ -50,7 +51,7 @@ class FitToolbar(NavigationToolbar2Tk):
 
     def home(self, *args):
         self._on_home()
-from .widgets import card, section_title, Chip, ScrollFrame, Segmented, FeatureList, Paned
+from .widgets import card, section_title, Chip, ChipBar, ScrollFrame, Segmented, FeatureList, Paned
 
 
 class SmoothCanvas(FigureCanvasTkAgg):
@@ -121,6 +122,9 @@ class App:
         self._mtime = None
         self._sort = ("run", False)
         self._filters = {c: "" for c in CATS}
+        self.cond = {c: "all" for c in CATS}   # 外加條件篩選：all / field / gate / none（依 1D、2D 各自記住）
+        self._axes = {}                 # 這個資料庫的閘極設定：參數名稱 -> bottom / top / gate
+        self._param_conds = None
         self.gui_settings = ST.load_settings()
         self.plot_style = {**ST.DEFAULT_STYLE, **self.gui_settings.get("style", {})}
         self.per_run = {}               # 分析名稱 -> {參數 -> {run_id: 文字}}（存在樣品資料夾）
@@ -252,7 +256,7 @@ class App:
                      selection=list(self.tree.selection()), filters=dict(self._filters),
                      filter=self.filter_var.get(), db_paths=dict(self._db_paths),
                      update_info=self._update_info, prompted=self._prompted_version,
-                     history=(self._history, self._redo))
+                     history=(self._history, self._redo), cond=dict(self.cond))
         self._save_sash()
         self._dead = True
         self._gen += 1
@@ -271,6 +275,8 @@ class App:
         if st["db"]:
             self.cache = st["cache"]
             self.open_db(st["db"], cache=st["cache"])
+        self.cond.update(st.get("cond") or {})
+        self.cond_bar.select(self.cond.get(self.category, "all"), notify=False)
         self._filters = st["filters"]
         if st["category"] != self.category:
             self.segment.select(0 if st["category"] == "1D" else 1, notify=False)
@@ -369,8 +375,24 @@ class App:
 
     def _build_left(self, parent):
         self.segment = Segmented(parent, [("1D", "1D 資料分析", "曲線：IV、VI…"),
-                                          ("2D", "2D 資料分析", "色圖：磁場 × 電流…")], self._on_category)
+                                          ("2D", "2D 資料分析", "色圖：磁場、閘極 × 電流…")], self._on_category)
         self.segment.pack(fill="x")
+        tk.Label(parent, text="外加條件", bg=T.CARD, fg=T.TEXT, font=T.font(10, "bold"),
+                 anchor="w").pack(fill="x", pady=(12, 2))
+        self.cond_bar = ChipBar(parent, [("all", "全部", "所有資料與功能"),
+                                         ("field", "⊗ 磁場", CONDITIONS["field"]["label"]),
+                                         ("gate", "⚡ 電場", CONDITIONS["gate"]["label"]),
+                                         ("none", "○ 無外加", CONDITIONS["none"]["label"])],
+                                self._on_condition, "1D")
+        self.cond_bar.pack(fill="x")
+        self.cond_hint = tk.Label(parent, text="", bg=T.CARD, fg=T.FAINT, font=T.font(8), anchor="w",
+                                  justify="left", wraplength=T.px(280))
+        self.cond_hint.pack(fill="x", pady=(2, 0))
+        self.gate_line = tk.Label(parent, text="", bg=T.CARD, fg=T.ACCENTS["2D"]["text"], font=T.font(8, "underline"),
+                                  anchor="w", justify="left", cursor="hand2", wraplength=T.px(280))
+        self.gate_line.bind("<Button-1>", lambda e: self.edit_gate_roles())
+        parent.bind("<Configure>", lambda e: [w.configure(wraplength=max(e.width - T.px(10), 120))
+                                              for w in (self.cond_hint, self.gate_line)], add="+")
         tk.Label(parent, text="分析功能", bg=T.CARD, fg=T.TEXT, font=T.font(11, "bold"),
                  anchor="w").pack(fill="x", pady=(14, 0))
         tk.Label(parent, text="點選功能；變淡的功能不支援目前選取的資料", bg=T.CARD, fg=T.FAINT,
@@ -1122,6 +1144,7 @@ class App:
     # ================================================================== 主色
     def _apply_accent(self):
         a = T.setup_ttk(self.style, self.category)
+        self.cond_bar.set_accent(self.category)
         self.logo_mark.configure(fg=a["main"])
         self.prm_icon.configure(fg=a["main"])
         self.plot_icon.configure(bg=a["soft"], fg=a["main"])
@@ -1218,6 +1241,10 @@ class App:
         self._mtime = db_mtime(db.path)
         self._load_per_run()
         self._apply_saved_params()
+        keep_view = cache is None and self.gui_settings.get("restore_view", True)
+        saved_cond = (self._view.get("cond") or {}) if keep_view else {}
+        self.cond = {c: saved_cond.get(c, "all") if cache is None else self.cond.get(c, "all") for c in CATS}
+        self.cond_bar.select(self.cond.get(self.category, "all"), notify=False)
         label = next((k for k, v in self._db_paths.items() if v == db.path), None)
         if label is None:
             label = db.path
@@ -1353,6 +1380,9 @@ class App:
     def _visible_runs(self):
         want_2d = self.category == "2D"
         runs = [r for r in self.all_runs if r.is_2d == want_2d]
+        cond = self.cond.get(self.category, "all")
+        if cond != "all":
+            runs = [r for r in runs if r.condition == cond]
         for tok in self.filter_var.get().split():
             m = re.fullmatch(r"(\d+)-(\d+)", tok)
             if m:
@@ -1391,6 +1421,7 @@ class App:
             self.tree.selection_set(again)
         self._suspend = False
         self._update_count()
+        self._update_conditions()
 
     def _update_count(self):
         n, s = len(self.tree.get_children()), len(self.tree.selection())
@@ -1424,15 +1455,137 @@ class App:
         self._schedule_plot()
 
     def _update_feature_compat(self):
-        modes = {i.mode for i in self._selected_infos()}
-        self.features.set_enabled({a.name: all(a.supports(m) for m in modes)
+        infos = self._selected_infos()
+        self.features.set_enabled({a.name: all(a.accepts(i) for i in infos)
                                    for a in self.analyses[self.category]})
+        if self._active_conditions() != self._param_conds and self.current.get(self.category) is not None:
+            self._build_params()            # 參數只顯示適用於選取資料的（例如閘極資料不顯示 B₀ 平移）
+
+    # ================================================================== 外加條件：磁場 / 電場 / 無外加
+    def _active_conditions(self):
+        """目前要顯示哪些外加條件的參數：選取的 run 的條件；沒選時用上面的分類；都沒有 = 全部顯示。"""
+        conds = {i.condition for i in self._selected_infos()}
+        if not conds and self.cond.get(self.category, "all") != "all":
+            conds = {self.cond[self.category]}
+        return frozenset(conds)
+
+    def _feature_items(self):
+        cond = self.cond.get(self.category, "all")
+        lst = self.analyses[self.category]
+        if cond == "all":
+            return lst
+        return [a for a in lst if a.supports_condition(cond)] or lst
+
+    def _on_condition(self, key):
+        self.cond[self.category] = key
+        self._view.setdefault("cond", {})[self.category] = key
+        self._schedule_view_save()
+        self._fill_tree()
+        self._load_feature_list()
+        self._welcome()
+
+    def _update_conditions(self):
+        """分類的筆數、說明，以及閘極設定那一行。"""
+        if not hasattr(self, "cond_bar"):
+            return
+        want_2d = self.category == "2D"
+        runs = [r for r in self.all_runs if r.is_2d == want_2d] if self.db else []
+        counts = {"all": len(runs)} if self.db else {}
+        for c in CONDITIONS:
+            if self.db:
+                counts[c] = sum(r.condition == c for r in runs)
+        self.cond_bar.set_counts(counts)
+        cond = self.cond.get(self.category, "all")
+        hints = {"all": "依外加條件分類資料與功能；選一筆資料時，不適用的功能會變淡",
+                 "field": "磁場掃描的資料（例如 IV vs By），功能可平移 B₀",
+                 "gate": "閘極電壓掃描的資料（電場；V_bottom / V_top 可以在下面修改）",
+                 "none": "沒有磁場、閘極掃描的資料（例如不同溫度的 IV）"}
+        self.cond_hint.configure(text=hints.get(cond, ""))
+        names = sorted({n for r in runs for n in r.gate_params})
+        if names and cond in ("all", "gate"):
+            txt = "⚡ 閘極：" + "、".join(f"{n} = {M.GATE_ROLES_INFO[M.gate_role(n)]['plain']}" for n in names) + "　✎ 修改"
+            self.gate_line.configure(text=txt)
+            if not self.gate_line.winfo_ismapped():
+                self.gate_line.pack(fill="x", pady=(2, 0), after=self.cond_hint)
+        else:
+            self.gate_line.pack_forget()
+
+    def _twin(self, a, items):
+        """同一種分析（family）裡適用這些資料的版本，例如「Ic vs B」→「Ic vs Vg」。"""
+        if not a.family:
+            return None
+        for b in self.analyses[self.category]:
+            if b is not a and b.family == a.family and all(b.accepts(it.info) for it in items):
+                return b
+        return None
+
+    # ---------------------------------------------------------------- 閘極設定（V_bottom / V_top）
+    def _apply_gate_roles(self):
+        M.GATE_ROLES.clear()
+        M.GATE_ROLES.update(self.gui_settings.get("gate_roles") or {})
+        M.GATE_ROLES.update(self._axes or {})
+
+    def edit_gate_roles(self):
+        """⚡ 閘極設定：每個閘極電壓參數是底部（V_bottom）、頂部（V_top）或一般 Vg。"""
+        names = sorted({n for r in self.all_runs for n in r.gate_params}) if self.db else []
+        if not names:
+            messagebox.showinfo("閘極設定", "這個資料庫裡沒有閘極電壓的量測（例如 appl_TG、appl_BG、gate）")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("閘極設定")
+        win.configure(bg=T.CARD)
+        win.transient(self.root)
+        tk.Label(win, text="閘極電壓的電場從樣品哪一側來？圖上的軸標籤會跟著改（V_bottom / V_top）。\n"
+                 "設定存在這個資料庫；勾選下面的選項，之後開啟的其他資料庫也會預設這樣。",
+                 bg=T.CARD, fg=T.MUTED, font=T.font(9), justify="left").pack(anchor="w", padx=12, pady=(10, 6))
+        body = tk.Frame(win, bg=T.CARD)
+        body.pack(fill="x", padx=12)
+        roles = list(M.GATE_ROLES_INFO)
+        labels = [M.GATE_ROLES_INFO[r]["label"] for r in roles]
+        vars_ = {}
+        for k, n in enumerate(names):
+            used = [r.run_id for r in self.all_runs if n in r.gate_params]
+            tk.Label(body, text=n, bg=T.CARD, fg=T.TEXT, font=T.font(10, "bold")).grid(row=2 * k, column=0, sticky="w", pady=(6, 0))
+            var = tk.StringVar(value=labels[roles.index(M.gate_role(n))])
+            ttk.Combobox(body, textvariable=var, values=labels, state="readonly", width=40).grid(
+                row=2 * k, column=1, sticky="w", padx=(10, 0), pady=(6, 0))
+            tk.Label(body, text=f"用在 {len(used)} 筆：run " + ", ".join(map(str, used[:12])) + ("…" if len(used) > 12 else ""),
+                     bg=T.CARD, fg=T.FAINT, font=T.font(8)).grid(row=2 * k + 1, column=1, sticky="w", padx=(10, 0))
+            vars_[n] = var
+        as_default = tk.BooleanVar(value=False)
+        ttk.Checkbutton(win, text="其他資料庫也預設這樣設定", variable=as_default).pack(anchor="w", padx=12, pady=(10, 0))
+
+        def ok():
+            glob = dict(self.gui_settings.get("gate_roles") or {})
+            for n, var in vars_.items():
+                role = roles[labels.index(var.get())]
+                self._axes[n] = role
+                if as_default.get():
+                    glob[n] = role
+            if as_default.get():
+                self.gui_settings["gate_roles"] = glob
+                ST.save_settings(self.gui_settings)
+            self._apply_gate_roles()
+            self._save_per_run()
+            win.destroy()
+            self._fill_tree()
+            self.status("閘極設定已更新：" + "、".join(f"{n} = {M.GATE_ROLES_INFO[M.gate_role(n)]['plain']}"
+                                                  for n in names), "ok")
+            if self.tree.selection():
+                self._schedule_plot()
+        bf = tk.Frame(win, bg=T.CARD)
+        bf.pack(fill="x", padx=12, pady=10)
+        ttk.Button(bf, text="確定", style="Accent.TButton", command=ok).pack(side="right")
+        ttk.Button(bf, text="取消", style="Ghost.TButton", command=win.destroy).pack(side="left")
+        win._ok, win._vars, win._default = ok, vars_, as_default
+        return win
 
     def _on_category(self, cat):
         if cat == self.category:
             return
         self._filters[self.category] = self.filter_var.get()
         self.category = cat
+        self.cond_bar.select(self.cond.get(cat, "all"), notify=False)
         self._apply_accent()
         self._suspend = True
         self.tree.selection_remove(self.tree.selection())
@@ -1475,6 +1628,9 @@ class App:
                     self.current[c] = a
             for c, text in (v.get("filters") or {}).items():
                 self._filters[c] = text
+            for c, k in (v.get("cond") or {}).items():
+                if c in self.cond and k in ("all", *CONDITIONS):
+                    self.cond[c] = k
             cat = v.get("category", self.category)
             if cat != self.category and cat in self.analyses:
                 self.segment.select(0 if cat == "1D" else 1, notify=False)
@@ -1482,6 +1638,7 @@ class App:
                 self.category = cat
                 self._apply_accent()
                 self._suspend = False
+            self.cond_bar.select(self.cond.get(self.category, "all"), notify=False)
             self._load_feature_list()
             if self.filter_var.get() != self._filters.get(self.category, ""):
                 self.filter_var.set(self._filters.get(self.category, ""))
@@ -1496,7 +1653,9 @@ class App:
 
     # ================================================================== 功能與參數
     def _load_feature_list(self):
-        lst = self.analyses[self.category]
+        lst = self._feature_items()
+        if self.current[self.category] not in lst:
+            self.current[self.category] = lst[0]
         self.features.set_items(lst, self.category, self.current[self.category].name)
         self._feature_scroll.to_top()
         self._build_params()
@@ -1522,7 +1681,11 @@ class App:
         store = a.store_key
         row = 0
         self._text_boxes = {}
+        conds = self._active_conditions()
+        self._param_conds = conds
         for prm in a.global_params:
+            if prm.conditions and conds and not (set(prm.conditions) & conds):
+                continue                       # 例如 B₀ 平移只在磁場資料顯示
             var = self._param_var(store, prm)
             if prm.kind == "bool":
                 ttk.Checkbutton(self.param_frame, text=prm.label, variable=var).grid(
@@ -1637,6 +1800,7 @@ class App:
         self.saved_params = {}
         self.labels = {}
         self._view = {}
+        self._axes = {}
         path = self._per_run_path()
         try:
             with open(path, encoding="utf-8") as f:
@@ -1645,10 +1809,12 @@ class App:
             self.saved_params = {st: dict(v) for st, v in data.pop("__params__", {}).items()}
             self.labels = data.pop("__labels__", {})
             self._view = data.pop("__view__", {})
+            self._axes = dict(data.pop("__axes__", {}) or {})
             self.per_run = {an: {k: {int(r): v for r, v in vals.items()} for k, vals in keys.items()}
                             for an, keys in data.items()}
         except (OSError, ValueError, TypeError, AttributeError):
             pass
+        self._apply_gate_roles()
 
     def _save_per_run(self):
         self._save_job = None
@@ -1676,6 +1842,8 @@ class App:
                 allc[self.db.name]["__labels__"] = labels
             self._view["filters"] = dict(self._filters, **{self.category: self.filter_var.get()})
             allc[self.db.name]["__view__"] = self._view
+            if self._axes:
+                allc[self.db.name]["__axes__"] = self._axes
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(allc, f, ensure_ascii=False, indent=1)
         except OSError as e:
@@ -2692,6 +2860,28 @@ class App:
             return
         if not a.multi:
             items = items[:1]
+        if not all(a.supports_condition(it.info.condition) for it in items):
+            twin = self._twin(a, items)
+            conds = "、".join(sorted({CONDITIONS[it.info.condition]["short"] for it in items}))
+            if twin is not None:                  # 例如選了閘極資料、功能是 Ic vs B → 自動換成 Ic vs Vg
+                self.current[self.category] = twin
+                self._view.setdefault("current", {})[self.category] = twin.name
+                if twin.name not in self.features.cards:
+                    self._load_feature_list()
+                self.features.select(twin.name, notify=False)
+                self._build_params()
+                self.status(f"選取的是{conds}資料 → 自動改用「{twin.name}」", "ok")
+                a = twin
+                if not a.multi:
+                    items = items[:1]
+            else:
+                self._set_plot_header(a, items)
+                self._compute_gen += 1
+                self._set_busy(None)
+                self._message(f"「{a.name}」不適用{conds}的資料",
+                              f"這個功能適用：{a.conditions_text}\n請在左邊「外加條件」選對應的分類，或換一個功能")
+                self.status(f"{a.name}：外加條件不符（選取的是{conds}資料）", "warn")
+                return
         bad = sorted({MODES.get(it.mode, {"short": it.mode})["short"] for it in items if not a.supports(it.mode)})
         self._set_plot_header(a, items)
         if bad:

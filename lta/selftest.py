@@ -124,9 +124,31 @@ def make_db(path, seed=0):
     by = add("IV vs By", f"IV_vs_By_{CONTACTS}, T_1.6K",
              [("y_field", "T", []), ("appl_current", "A", []), ("meas_voltage_K2", "V", ["y_field", "appl_current"])],
              ["y_field", "appl_current", "meas_voltage_K2"], rows)
+    gate = add("IV vs TG", f"IV_vs_TG_{CONTACTS}, T_1.6K",
+               [("appl_TG", "V", []), ("appl_current", "A", []),
+                ("meas_voltage_K2", "V", ["appl_TG", "appl_current"])],
+               ["appl_TG", "appl_current", "meas_voltage_K2"], gate_map(rng))
     con.commit()
     con.close()
-    return dict(iv=iv_runs, vi=[vi], map=[by])
+    return dict(iv=iv_runs, vi=[vi], map=[by], gate=[gate])
+
+
+def gate_ic(vg):
+    """假樣品的切換電流 (A)：Vg ≈ −3 V 時最小，往兩邊變大（仿 TaS2 閘極量測）。"""
+    return (2 + np.where(vg < -3, 10.5, 6.0) * np.abs(vg + 3)) * 1e-9
+
+
+def gate_map(rng, vg=None, I=None):
+    """2D：閘極電壓 × 電流 → 電壓（超導區 R ≈ 50 Ω，切換後 R_N ≈ 2 kΩ）。"""
+    vg = np.linspace(-15, 15, 61) if vg is None else vg
+    I = np.linspace(-150e-9, 150e-9, 121) if I is None else I
+    rows = []
+    for g in vg:
+        ic = gate_ic(g)
+        for i in I:
+            v = 50 * i if abs(i) < ic else np.sign(i) * (50 * ic + 2000 * (abs(i) - ic) + 20e-6)
+            rows.append((g, i, v + rng.normal(0, 2e-7)))
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -167,12 +189,13 @@ def run_analyses(db, runs, rep):
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from .core.registry import load_analyses, defaults_for
     reg = load_analyses()
-    sets = {"1D": [("IV", runs["iv"]), ("VI", runs["vi"])], "2D": [("map", runs["map"])]}
+    sets = {"1D": [("IV", runs["iv"]), ("VI", runs["vi"])],
+            "2D": [("map", runs["map"]), ("gate", runs["gate"])]}
     for cat, lst in reg.items():
         for a in lst:
             for tag, ids in sets[cat]:
                 items = _items(db, ids)
-                if not all(a.supports(it.mode) for it in items):
+                if not all(a.accepts(it.info) for it in items):
                     continue
                 if not a.multi:
                     items = items[:1]
@@ -287,14 +310,22 @@ def run_gui(db_path, runs, rep, timeout=60, out=None):
                 time.sleep(0.02)
             raise TimeoutError("等太久")
         try:
+            t = time.time()
+            while app.db is None or not app.tree.get_children():      # 開檔在背景進行
+                if time.time() - t > timeout:
+                    raise TimeoutError("開啟資料庫等太久")
+                root.update()
+                app._poll_queue()
+                time.sleep(0.02)
             done = []
-            for cat, ids in (("1D", runs["iv"]), ("2D", runs["map"])):
+            for cat, ids in (("1D", runs["iv"]), ("2D", runs["map"]), ("2D", runs["gate"])):
                 if cat != app.category:
                     app.segment.select(0 if cat == "1D" else 1)
                     wait()
                 app.tree.selection_set([str(r) for r in ids])
+                info = app.db.info(ids[0])
                 for a in app.analyses[cat]:
-                    if not a.supports("current_bias"):
+                    if not a.accepts(info):
                         continue
                     app.features.select(a.name)
                     for prm, val in overrides(a).items():
@@ -303,9 +334,19 @@ def run_gui(db_path, runs, rep, timeout=60, out=None):
                             var.set(val)
                     app.plot()
                     wait()
+                    for _ in range(200):                       # 資料在背景載入完才會畫
+                        if app.status_var.get().startswith(("完成", "錯誤")) or "失敗" in app.status_var.get():
+                            break
+                        root.update()
+                        app._poll_queue()
+                        if app._plot_job is not None:
+                            app.plot()
+                        wait()
+                        time.sleep(0.02)
                     status = app.status_var.get()
-                    if status.startswith("錯誤"):
+                    if not status.startswith("完成"):
                         raise RuntimeError(f"{a.name}：{status}")
+                    app.status_var.set("")
                     done.append(a.name)
             app.undo(); app.redo()
             if out:                                   # 存圖：指定 8.5 × 6 cm，畫面上的圖大小不能變
@@ -379,6 +420,9 @@ def main(gui=True, log=print):
             assert info[runs["iv"][0]].mode == "current_bias", info[runs["iv"][0]].mode
             assert info[runs["vi"][0]].mode == "voltage_bias", info[runs["vi"][0]].mode
             assert info[runs["map"][0]].is_2d
+            assert info[runs["map"][0]].condition == "field", info[runs["map"][0]].condition
+            assert info[runs["gate"][0]].condition == "gate", info[runs["gate"][0]].condition
+            assert info[runs["iv"][0]].condition == "none"
             assert abs(info[runs["iv"][0]].T_K - 1.6) < 1e-9
             return "量測模式、溫度、2D 判斷正確"
         rep.check("讀取資料庫", detect)
