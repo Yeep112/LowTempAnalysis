@@ -198,6 +198,8 @@ class Map2D:
 def reshape_grid(slow, fast, z):
     """依「慢軸第一次改變的位置」把 1D 資料排成 (N_slow, N_fast)。未完成的量測會截掉最後不完整的一列。"""
     total = min(len(slow), len(fast), len(z))
+    if total == 0:
+        raise ValueError("這筆 run 沒有資料點（可能還在量測中，或量測值都是空的）")
     slow, fast, z = slow[:total], fast[:total], z[:total]
     changes = np.flatnonzero(slow != slow[0])
     nf = int(changes[0]) if len(changes) else total

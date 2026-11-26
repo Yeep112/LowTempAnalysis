@@ -113,6 +113,7 @@ class Dataset:
     labels: dict = field(default_factory=dict)
     dependents: list = field(default_factory=list)
     setpoints: list = field(default_factory=list)
+    tables: dict = field(default_factory=dict)   # 量測值分開存的時候：量測值名稱 -> 它自己那幾列的資料
 
     # ---- 常用欄位自動判斷 ----
     def current_name(self) -> str:
@@ -166,9 +167,10 @@ class Dataset:
         if len(self.setpoints) > 2:
             raise NotImplementedError(f"Run {self.run_id} 有 {len(self.setpoints)} 個掃描軸，"
                                       "3 維以上的資料還沒有分析功能（見 擴充指南.md）")
-        slow, fast = order_setpoints(self.data, self.setpoints)
         z = measured if measured in self.data else self.dependents[0]
-        S, F, Z = reshape_grid(self.data[slow], self.data[fast], self.data[z])
+        data = self.tables.get(z, self.data)
+        slow, fast = order_setpoints(data, self.setpoints)
+        S, F, Z = reshape_grid(data[slow], data[fast], data[z])
         u = self.units
         return Map2D(Axis(slow, u.get(slow, ""), S), Axis(fast, u.get(fast, ""), F),
                      Axis(z, u.get(z, ""), Z), detect_mode(u.get(fast, ""), u.get(z, "")))
@@ -274,6 +276,8 @@ class QDB:
             field_axis = next((p for p in params_list if p.endswith("_field")), None)
             units, deps = _parse_description(desc_text)
             measured = [n for n in params_list if deps.get(n)] or params_list[-1:]
+            # 掃描軸最多的量測值排前面（例如 meas_voltage_K2 依 Vg、I；每個 Vg 記一次的溫度排後面）
+            measured.sort(key=lambda n: -len(deps.get(n, [])))
             setpoints = []
             for m in measured:
                 for d in deps.get(m, []):
@@ -336,13 +340,24 @@ class QDB:
         setpoints = [n for n in info.setpoints if n in cols] or [n for n in cols if n not in dependents]
 
         arr = np.array(rows, dtype=float) if rows else np.empty((0, len(cols)))
+        tables = {}
         # 和 qcodes get_parameter_data 一樣：丟掉量測值是空的列
         if dependents and len(arr):
-            keep = np.all(np.isfinite(arr[:, [cols.index(d) for d in dependents]]), axis=1)
-            arr = arr[keep]
+            fin = {d: np.isfinite(arr[:, cols.index(d)]) for d in dependents}
+            keep = np.all(np.vstack(list(fin.values())), axis=0)
+            counts = {d: int(m.sum()) for d, m in fin.items()}
+            if keep.sum() >= 0.5 * max(counts.values()):
+                arr = arr[keep]                     # 所有量測值存在同一列（一般情況）
+            else:
+                # 量測值分開存（例如每個閘極電壓另外記一次溫度）：每個量測值用它自己的那幾列，
+                # 主要的量測值 = 掃描軸最完整、點數最多的那個（例如 meas_voltage_K2）
+                dependents = sorted(dependents, key=lambda d: (-len(set(deps.get(d, [])) & set(setpoints)),
+                                                               -counts[d], units.get(d) != "V"))
+                tables = {d: {c: arr[fin[d], i].copy() for i, c in enumerate(cols)} for d in dependents}
+                arr = arr[fin[dependents[0]]]
         data = {c: arr[:, i].copy() for i, c in enumerate(cols)}
         return Dataset(run_id=int(run_id), info=info, data=data, units=units,
-                       labels=labels, dependents=dependents, setpoints=setpoints)
+                       labels=labels, dependents=dependents, setpoints=setpoints, tables=tables)
 
     # ---- 依條件挑 run ----
     def select(self, kind=None, name_contains=None, contacts=None, T_range=None,

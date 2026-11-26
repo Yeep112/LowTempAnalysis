@@ -95,7 +95,7 @@ def make_db(path, seed=0):
         con.execute(f'create table "{table}" (id INTEGER PRIMARY KEY, '
                     + ", ".join(f'"{c}" numeric' for c in columns) + ")")
         con.executemany(f'insert into "{table}" ({", ".join(chr(34) + c + chr(34) for c in columns)}) values '
-                        f'({", ".join("?" * len(columns))})', [tuple(map(float, row)) for row in data])
+                        f'({", ".join("?" * len(columns))})', [tuple(None if x is None else float(x) for x in row) for row in data])
         con.execute("insert into runs (run_id, exp_id, name, result_table_name, result_counter, run_timestamp, "
                     "completed_timestamp, is_completed, parameters, run_description) values (?,?,?,?,?,?,?,1,?,?)",
                     (run_id, run_id, "results", table, len(data), t0 + 60 * run_id, t0 + 60 * run_id + 30,
@@ -124,10 +124,19 @@ def make_db(path, seed=0):
     by = add("IV vs By", f"IV_vs_By_{CONTACTS}, T_1.6K",
              [("y_field", "T", []), ("appl_current", "A", []), ("meas_voltage_K2", "V", ["y_field", "appl_current"])],
              ["y_field", "appl_current", "meas_voltage_K2"], rows)
+    # 2D：IV vs 閘極。和真實量測一樣，每個閘極電壓另外記一次溫度（存在不同列、其他欄位是空的），
+    # 另外有一個沒接的 K1（整欄空白）→ 讀檔要用 meas_voltage_K2 自己的那幾列
+    gate_rows, last = [], None
+    for g, i, v in gate_map(rng):
+        if g != last:
+            gate_rows.append((1.6, g, None, None, None))
+            last = g
+        gate_rows.append((None, g, i, None, v))
     gate = add("IV vs TG", f"IV_vs_TG_{CONTACTS}, T_1.6K",
-               [("appl_TG", "V", []), ("appl_current", "A", []),
+               [("meas_temperature", "K", ["appl_TG"]), ("appl_TG", "V", []), ("appl_current", "A", []),
+                ("meas_voltage_K1", "V", ["appl_TG", "appl_current"]),
                 ("meas_voltage_K2", "V", ["appl_TG", "appl_current"])],
-               ["appl_TG", "appl_current", "meas_voltage_K2"], gate_map(rng))
+               ["meas_temperature", "appl_TG", "appl_current", "meas_voltage_K1", "meas_voltage_K2"], gate_rows)
     con.commit()
     con.close()
     return dict(iv=iv_runs, vi=[vi], map=[by], gate=[gate])
@@ -423,6 +432,8 @@ def main(gui=True, log=print):
             assert info[runs["map"][0]].condition == "field", info[runs["map"][0]].condition
             assert info[runs["gate"][0]].condition == "gate", info[runs["gate"][0]].condition
             assert info[runs["iv"][0]].condition == "none"
+            m = db.load(runs["gate"][0]).map2d()
+            assert m.z.name == "meas_voltage_K2" and m.z.values.shape == (61, 121), (m.z.name, m.z.values.shape)
             assert abs(info[runs["iv"][0]].T_K - 1.6) < 1e-9
             return "量測模式、溫度、2D 判斷正確"
         rep.check("讀取資料庫", detect)
