@@ -254,6 +254,43 @@ def cmd_publish(a, settings):
         sys.exit(1)
 
 
+def cmd_receive(a, settings):
+    from . import updater
+    print("=== 收更新：pending → 測試 → 簽章 → 發佈 ===\n")
+    try:
+        ok = updater.receive()
+    except Exception as e:
+        print(f"\n收更新失敗：{e}")
+        ok = False
+    if not ok:
+        sys.exit(1)
+
+
+def cmd_verify_release(a, settings):
+    """檢查目前這個 commit（或指定的 zip）的簽章。GitHub Actions 用來確認 main 有簽章。"""
+    from . import signing, updater
+    from .gui.launcher import TOOL_ROOT
+    public = signing.read_public_key(TOOL_ROOT)
+    if public is None:
+        print("還沒有發佈公鑰（lta/release_key.pub），第一次用 publish.bat / 收更新.bat 發佈時會自動產生。")
+        sys.exit(0 if a.allow_missing else 1)
+    if a.zip:
+        files = signing.zip_files(a.zip)
+    else:
+        git = updater.find_git()
+        if not git:
+            print("找不到 git")
+            sys.exit(1)
+        files = updater.head_files(git, TOOL_ROOT, a.ref)
+    try:
+        body = signing.verify_files(files, public)
+    except ValueError as e:
+        print(f"✗ 簽章驗證失敗：{e}")
+        print("  同事的軟體不會安裝這一版。請用 publish.bat 或 收更新.bat 發佈（會自動簽章）。")
+        sys.exit(1)
+    print(f"✓ 簽章正確：v{body.get('version')}，{len(body.get('files', {}))} 個檔案，{body.get('signed', '')} 簽章")
+
+
 def cmd_types(a, settings):
     from .batch.jobs import load_all
     for name, func in sorted(load_all().items()):
@@ -447,6 +484,11 @@ def main(argv=None):
     s.add_argument("version", nargs="?"); s.add_argument("-n", "--notes", nargs="*", default=None)
     s.add_argument("--repo"); s.add_argument("--branch"); s.add_argument("--push", action="store_true")
     sub.add_parser("publish", help="一鍵發佈到 GitHub（開發者用）")
+    sub.add_parser("receive", help="收更新：pending 分支 → 測試 → 簽章 → 發佈（開發者用）")
+    s = sub.add_parser("verify-release", help="檢查發佈簽章")
+    s.add_argument("--zip", help="檢查這個 zip（例如 GitHub 下載的）而不是目前的 commit")
+    s.add_argument("--ref", default="HEAD")
+    s.add_argument("--allow-missing", action="store_true", help="還沒有公鑰時不算失敗")
     s = sub.add_parser("selftest", help="自我測試（publish 前會自動執行）")
     s.add_argument("--no-gui", action="store_true")
     sub.add_parser("install")
@@ -460,7 +502,7 @@ def main(argv=None):
         p.print_help()
         return
     settings = load_settings()
-    if a.cmd not in ("release", "publish", "selftest"):
+    if a.cmd not in ("release", "publish", "selftest", "receive", "verify-release"):
         try:
             import numpy  # noqa: F401   這個 Python 能用才記下來
             from .gui.launcher import register_paths
@@ -472,7 +514,7 @@ def main(argv=None):
      "menu": cmd_menu, "open": cmd_open, "gui": cmd_gui, "app": cmd_gui, "shortcut": cmd_install,
      "install": cmd_install, "uninstall": cmd_uninstall, "diag": cmd_diag, "report": cmd_report,
      "update": cmd_update, "release": cmd_release, "publish": cmd_publish,
-     "selftest": cmd_selftest}[a.cmd](a, settings)
+     "receive": cmd_receive, "verify-release": cmd_verify_release, "selftest": cmd_selftest}[a.cmd](a, settings)
 
 
 if __name__ == "__main__":

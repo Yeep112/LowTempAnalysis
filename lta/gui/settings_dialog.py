@@ -490,11 +490,22 @@ class SettingsDialog:
         if updater.is_dev_folder():
             prow = tk.Frame(f, bg=T.CARD)
             prow.pack(fill="x", pady=(2, 4))
-            ttk.Button(prow, text="⬆ 發佈到 GitHub", style="Accent.TButton",
-                       command=lambda: self.app.spawn_console("publish", pause=True)).pack(side="left")
-            tk.Label(prow, text="你的開發資料夾，不會被自動更新。按這裡（或雙擊 publish.bat）會先自我測試再上傳；\n"
-                     "直接用 GitHub Desktop 推上去，同事也一樣會收到更新。", bg=T.CARD, fg=T.MUTED,
-                     justify="left", font=T.font(9)).pack(side="left", padx=10)
+            ttk.Button(prow, text="📥 收更新", style="Accent.TButton",
+                       command=lambda: self.app.spawn_console("receive", pause=True)).pack(side="left")
+            ttk.Button(prow, text="⬆ 發佈我自己的修改", style="Ghost.TButton",
+                       command=lambda: self.app.spawn_console("publish", pause=True)).pack(side="left", padx=(6, 0))
+            pend = getattr(self.app, "_pending_info", None)
+            if pend and pend.get("ahead"):
+                state = f"GitHub 上有待發佈的 v{pend.get('version') or '?'}，按「📥 收更新」發佈"
+            elif pend is not None:
+                state = "目前沒有待發佈的更新"
+            else:
+                state = ""
+            tk.Label(prow, text=(state + "\n" if state else "") +
+                     "📥 收更新 = Claude 推到 pending 的更新（同 收更新.bat）；⬆ = 你自己改的程式（同 publish.bat）。\n"
+                     "兩者都會先自我測試、再用你的私鑰簽章才上傳。直接用 GitHub Desktop 推上去的版本沒有簽章，"
+                     "同事的軟體不會安裝。", bg=T.CARD, fg=T.MUTED, justify="left", font=T.font(9),
+                     wraplength=T.px(620)).pack(side="left", padx=10)
         self._h(f, "更新記錄", None)
         box = ScrollFrame(f, bg=T.CARD)
         box.pack(fill="both", expand=True)

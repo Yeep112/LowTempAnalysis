@@ -391,6 +391,44 @@ def main(gui=True, log=print):
         if os.path.exists(pyw):
             rep.check("啟動檔 LowTempAnalysis.pyw", lambda: compile(open(pyw, encoding="utf-8").read(), pyw, "exec") and None)
 
+        def bats():
+            bad = []
+            for fn in sorted(os.listdir(TOOL_ROOT)):
+                if fn.lower().endswith(".bat"):
+                    b = open(os.path.join(TOOL_ROOT, fn), "rb").read()
+                    if any(c > 127 for c in b):
+                        bad.append(f"{fn} 有非英文字元（cmd 會讀錯）")
+                    elif b.count(b"\n") != b.count(b"\r\n"):
+                        bad.append(f"{fn} 換行不是 CRLF（cmd 可能跳行）")
+            assert not bad, "；".join(bad)
+            return "全部是 ASCII + CRLF"
+        rep.check("bat 檔格式", bats)
+
+        def sig():
+            from . import signing
+            sk = bytes.fromhex("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")
+            assert signing.public_key(sk).hex() == "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+            assert signing.sign(sk, b"\x72").hex().startswith("92a009a9f0d4cab8720e820b5f642540")
+            files = {"a.py": b"print(1)\r\n", "lta/b.py": b"x = 2\n"}
+            m, sg = signing.sign_files(files, "1.0", sk)
+            pub = signing.public_key(sk)
+            ok = dict(files, **{signing.MANIFEST: m, signing.SIGNATURE: sg.encode()})
+            signing.verify_files(dict(ok, **{"a.py": b"print(1)\n"}), pub)          # 換行不同不算竄改
+            for bad in ({"lta/b.py": b"x = 3\n"}, {"evil.py": b""}):
+                try:
+                    signing.verify_files(dict(ok, **bad), pub)
+                except ValueError:
+                    continue
+                raise AssertionError(f"竄改沒有被抓到：{list(bad)}")
+            try:
+                signing.verify_files(ok, signing.public_key(os.urandom(32)))
+                raise AssertionError("別的金鑰的簽章被接受了")
+            except ValueError:
+                pass
+            pk = signing.read_public_key(TOOL_ROOT)
+            return "Ed25519 正確，竄改會被擋下" + ("；已設定發佈公鑰" if pk else "；還沒有發佈公鑰（第一次發佈時產生）")
+        rep.check("更新簽章", sig)
+
         def imports():
             import importlib
             import pkgutil

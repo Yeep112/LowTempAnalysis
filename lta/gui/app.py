@@ -1366,6 +1366,8 @@ class App:
                     self._on_compute_error(*data)
                 elif kind == "update":
                     self._on_update_info(*data)
+                elif kind == "pending":
+                    self._on_pending(*data)
                 elif kind == "updated":
                     messagebox.showinfo("更新完成", f"已更新到 v{data}，接下來會重新開啟軟體。", parent=self.root)
                     self.restart()
@@ -2630,7 +2632,33 @@ class App:
                 self._queue.put(("update", (info, manual, None)))
             except Exception as e:
                 self._queue.put(("update", (None, manual, str(e))))
+            try:
+                from .. import updater
+                if updater.is_dev_folder():          # 開發資料夾：看 Claude 有沒有推「待發佈」的更新
+                    self._queue.put(("pending", (updater.pending_info(), manual)))
+            except Exception:
+                pass
         threading.Thread(target=work, daemon=True).start()
+
+    def _on_pending(self, info, manual=False):
+        """開發資料夾：GitHub 的 pending 分支有新的更新 → 問要不要收更新（測試 → 簽章 → 發佈）。"""
+        self._pending_info = info
+        if self._dead or not info or not info.get("ahead"):
+            return
+        ver = info.get("version") or "?"
+        self.status(f"有新版本待發佈 v{ver}：⚙ 設定 → 更新 →「📥 收更新」，或雙擊 收更新.bat", "warn")
+        key = info.get("sha")
+        if not manual and key == getattr(self, "_prompted_pending", None):
+            return
+        self._prompted_pending = key
+        ci = {"success": "✓ GitHub 測試通過（Windows、Mac）", "failure": "✗ GitHub 測試沒有通過，建議先不要發佈",
+              "pending": "GitHub 測試還在跑"}.get(info.get("checks"), "")
+        notes = "\n".join(f"· {n}" for n in (info.get("notes") or info.get("messages") or [])[:8])
+        if messagebox.askyesno("有新版本待發佈",
+                               f"Claude 推了一個待發佈的更新：v{ver}\n\n{notes}\n\n{ci}\n\n"
+                               "現在收下並發佈嗎？（會開一個視窗：自我測試 → 用你的私鑰簽章 → 上傳；"
+                               "測試沒過就不會上傳）", parent=self.root):
+            self.spawn_console("receive", pause=True)
 
     def _on_update_info(self, info, manual, error):
         if self._dead:

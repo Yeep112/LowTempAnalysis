@@ -11,6 +11,8 @@ REM  run_analysis.bat menu         text menu (same as tools.bat)
 REM  run_analysis.bat install      Start menu + desktop shortcuts
 REM  run_analysis.bat diag         show diagnostics
 REM  run_analysis.bat publish      developer: upload this version to GitHub
+REM  run_analysis.bat receive      developer: receive Claude's pending update, test, sign, publish
+REM  run_analysis.bat selftest     run the self test
 REM ============================================================
 setlocal EnableExtensions
 set "PYTHONUTF8=1"
@@ -37,6 +39,8 @@ if /i "%ARG%"=="update" goto update
 if /i "%ARG%"=="diag" goto diag
 if /i "%ARG%"=="publish" goto publish
 if /i "%ARG%"=="report" goto report
+if /i "%ARG%"=="receive" goto receive
+if /i "%ARG%"=="selftest" goto selftest
 if /i "%~x1"==".db" goto guidb
 "%PYEXE%" -m lta open "%~1"
 pause
@@ -78,6 +82,17 @@ exit /b
 "%PYEXE%" -m lta report
 pause
 exit /b
+
+:receive
+"%PYEXE%" -m lta receive
+pause
+exit /b
+
+:selftest
+"%PYEXE%" -m lta selftest
+set "RC=%ERRORLEVEL%"
+pause
+exit /b %RC%
 
 :publish
 "%PYEXE%" -m lta publish

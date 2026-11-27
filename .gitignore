@@ -11,3 +11,5 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .installed_commit
+release_signing_key.txt
+release_signing_key*.txt

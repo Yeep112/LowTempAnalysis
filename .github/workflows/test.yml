@@ -1,0 +1,56 @@
+# 每次推到 pending（Claude 的待發佈更新）或 main（正式版），GitHub 會開真的 Windows 與 Mac 電腦跑自我測試。
+# 結果顯示在 GitHub 網頁的 commit 旁邊（✓ / ✗），收更新.bat 發佈前也會讀這個結果。
+# 這裡完全不需要、也沒有任何私鑰：簽章只在你自己的電腦上做。
+name: 自我測試
+
+on:
+  push:
+    branches: [pending, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "Windows · Python 3.11（中文 cp950、用 bat 啟動）", os: windows-latest, python: "3.11", bat: true }
+          - { name: "Windows · Python 3.13", os: windows-latest, python: "3.13", bat: false }
+          - { name: "Mac · Python 3.12", os: macos-latest, python: "3.12", bat: false }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 安裝套件
+        run: python -m pip install --quiet numpy scipy matplotlib openpyxl
+      - name: 自我測試（含軟體視窗）
+        if: ${{ !matrix.bat }}
+        run: python -m lta selftest
+      - name: 自我測試：中文 Windows（cp950）+ run_analysis.bat
+        if: ${{ matrix.bat }}
+        shell: cmd
+        run: |
+          chcp 950 >nul
+          call run_analysis.bat selftest < nul
+
+  signature:
+    name: 發佈簽章（main）
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet numpy scipy matplotlib openpyxl
+      - name: 檢查 main 有沒有用你的私鑰簽章（沒簽章的話同事不會收到更新）
+        run: python -m lta verify-release --allow-missing

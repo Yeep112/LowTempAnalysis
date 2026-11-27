@@ -12,7 +12,10 @@ LowTempAnalysis\
 ├─ install.bat           ← 第一次雙擊，安裝成軟體（開始功能表 + 桌面圖示）
 ├─ run_analysis.bat      ← 開啟軟體（可複製到任何地方）
 ├─ tools.bat             ← 文字選單（批次分析、資料總表等）
-├─ publish.bat           ← 開發者用：一鍵發佈到 GitHub（同事會收到更新）
+├─ publish.bat           ← 開發者用：發佈自己改的程式（測試 → 簽章 → 上傳）
+├─ 收更新.bat             ← 開發者用：收下 Claude 的待發佈更新（測試 → 簽章 → 上傳）
+├─ release_manifest.*    ← 發佈簽章（每次發佈自動產生，同事的軟體用它驗證更新）
+├─ .github\workflows\    ← GitHub 自動測試（Windows、Mac）
 ├─ lta_env.bat           ← 尋找 Python（給上面的啟動檔用）
 ├─ release.json          ← 版本號與 GitHub 更新來源
 ├─ 發佈與更新.md          ← 透過 GitHub 發佈新版、讓其他人自動更新
@@ -43,6 +46,8 @@ LowTempAnalysis\
 | `run_analysis.bat` | 開啟軟體（黑色視窗會馬上關掉，軟體獨立執行）。可以複製到任何地方使用；把 .db 拖上去會直接用它開啟 |
 | `tools.bat` | 文字選單：批次分析、資料總表、建立批次設定檔…（軟體裡的「▾ 工具」也有同樣的功能） |
 | `install.bat` | 建立開始功能表與桌面捷徑 |
+| `收更新.bat` | 開發者：收下 Claude 推到 pending 的更新 → 測試 → 簽章 → 發佈（見「發佈與更新.md」） |
+| `publish.bat` | 開發者：發佈自己改的程式（測試 → 簽章 → 上傳） |
 | `LowTempAnalysis.pyw` | 直接開啟軟體（不會有黑色視窗）。工作列釘選的圖示執行的就是它 |
 
 需要的 Python 套件：numpy、scipy、matplotlib、tkinter（Anaconda 都內建）。啟動檔會自動尋找電腦上的 Python（Anaconda、Miniconda、python.org…）並檢查套件；找不到時會說明原因，並可以自動安裝。

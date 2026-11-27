@@ -8,8 +8,13 @@
           settings.toml、jobs\\*.toml（_template.toml 除外）、catalog.*、_backup\\、logs\\
   ‧ 開發用資料夾（有 .git）不會被自動更新，請用 git pull
 
+簽章
+  ‧ 每次發佈都附上 release_manifest.json（每個檔案的 SHA-256）與 release_manifest.sig（Ed25519，私鑰只在開發者電腦）
+  ‧ 同事的軟體用自己已經有的公鑰（lta/release_key.pub）驗證，對不上就不安裝（見 signing.py）
+
 發佈新版（開發者）
-  python -m lta release 2.3.0 -n "新增：xxx" "修正：yyy" --push
+  publish.bat     你自己改的程式 → 測試 → 簽章 → 上傳
+  收更新.bat       Claude 推到 pending 分支的更新 → 測試 → 簽章 → 上傳
 """
 from __future__ import annotations
 
@@ -216,6 +221,7 @@ def apply_update(info=None, log=print, zip_source=None, root=TOOL_ROOT):
         else:
             with open(zpath, "wb") as f:
                 f.write(_get(zip_source, timeout=60))
+        verify_download(zpath, root, local.get("version", "0"), log)
         log("解壓縮…")
         with zipfile.ZipFile(zpath) as z:
             z.extractall(os.path.join(tmp, "x"))
@@ -268,6 +274,24 @@ def apply_update(info=None, log=print, zip_source=None, root=TOOL_ROOT):
         return new_ver
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def verify_download(zpath, root, current_version, log=print):
+    """用這台電腦上已經有的公鑰驗證下載的更新；還沒有公鑰（舊版）就跳過。失敗丟 RuntimeError，不會安裝。"""
+    from . import signing
+    public = signing.read_public_key(root)
+    if public is None:
+        log("（這台電腦的版本還沒有簽章驗證，這次直接安裝；之後的更新都會驗證）")
+        return None
+    try:
+        body = signing.verify_files(signing.zip_files(zpath), public)
+    except ValueError as e:
+        raise RuntimeError(f"更新的簽章驗證失敗，為了安全沒有安裝。\n原因：{e}\n"
+                           "可能是發佈的人還沒簽章就上傳（例如直接用 GitHub Desktop 推送）。請通知維護者。")
+    if parse_version(body.get("version", "0")) < parse_version(current_version):
+        raise RuntimeError(f"下載到的是比較舊的版本（v{body.get('version')}），沒有安裝")
+    log(f"✓ 簽章驗證通過（v{body.get('version')}，{body.get('signed', '')} 簽章）")
+    return body
 
 
 def _prune_backups(folder, keep=KEEP_BACKUPS):
@@ -382,7 +406,7 @@ def bump_patch(version):
     return f"{major}.{minor}.{patch + 1}"
 
 
-PERSONAL_FILES = ("settings.toml", "catalog.csv", "catalog.xlsx", ".catalog_cache.json")
+PERSONAL_FILES = ("settings.toml", "catalog.csv", "catalog.xlsx", ".catalog_cache.json", "release_signing_key.txt")
 
 
 def run_selftest(root, log=print, python=None):
@@ -395,6 +419,236 @@ def run_selftest(root, log=print, python=None):
     for line in proc.stdout:
         log(line.rstrip())
     return proc.wait() == 0
+
+
+def _git_runner(git, root, log):
+    def run(*args, check=True, quiet=False, extra=()):
+        out = subprocess.run([git, *extra, *args], cwd=root, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace")
+        if not quiet and out.stdout.strip():
+            log(out.stdout.strip())
+        if check and out.returncode != 0:
+            raise RuntimeError((out.stderr or out.stdout).strip() or f"git {args[0]} 失敗")
+        return out
+    return run
+
+
+def _identity(run, rel):
+    if run("config", "user.email", check=False, quiet=True).returncode != 0:
+        owner = (rel.get("repo") or "user/x").split("/")[0]
+        return ("-c", f"user.name={owner}", "-c", f"user.email={owner}@users.noreply.github.com")
+    return ()
+
+
+def ensure_signing_key(root, log=print):
+    """拿到私鑰；第一次發佈時自動產生（並把公鑰寫進 lta/release_key.pub）。回傳私鑰。"""
+    from . import signing
+    secret = signing.load_private_key()
+    public = signing.read_public_key(root)
+    if secret is None:
+        if public is not None:
+            raise RuntimeError(
+                f"找不到發佈用的私鑰：{signing.key_path()}\n"
+                "這個私鑰之前已經用來簽章，同事的軟體只接受它簽的更新。請從備份放回這個位置再發佈。\n"
+                "（真的遺失了：刪掉 lta\\release_key.pub 會產生新的一組，但同事必須手動重新安裝一次）")
+        secret, public = signing.new_private_key()
+        signing.write_public_key(root, public)
+        log("\n★ 第一次發佈：已產生發佈用的簽章金鑰")
+        log(f"  私鑰（只在這台電腦，不會上傳）：{signing.key_path()}")
+        log("  請把這個檔案另外備份（隨身碟、密碼管理器）；換電腦發佈時要把它放回同一個位置。")
+        log(f"  公鑰已寫入 {signing.PUBKEY_REL}，會跟著程式發給同事。\n")
+        return secret
+    if public is not None and signing.public_key(secret) != public:
+        raise RuntimeError(f"私鑰和程式裡的公鑰（{signing.PUBKEY_REL}）不是同一組：{signing.key_path()}")
+    if public is None:
+        signing.write_public_key(root, signing.public_key(secret))
+    return secret
+
+
+def head_files(git, root, ref="HEAD"):
+    """用 git archive 取得某個 commit 的所有檔案（和 GitHub 下載的 zip 內容相同）。"""
+    from . import signing
+    tmp = tempfile.mkdtemp(prefix="lta_sign_")
+    try:
+        zpath = os.path.join(tmp, "head.zip")
+        out = subprocess.run([git, "-c", "core.autocrlf=false", "-c", "core.eol=lf", "archive", "--format=zip",
+                              "-o", zpath, ref], cwd=root, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace")
+        if out.returncode != 0:
+            raise RuntimeError(out.stderr.strip() or "git archive 失敗")
+        return signing.zip_files(zpath)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def is_signed(git, root, ref="HEAD"):
+    from . import signing
+    public = signing.read_public_key(root)
+    if public is None:
+        return False
+    try:
+        signing.verify_files(head_files(git, root, ref), public)
+        return True
+    except (ValueError, RuntimeError):
+        return False
+
+
+def sign_head(run, git, root, rel, secret, log=print):
+    """對目前的 commit 簽章：寫入 release_manifest.json / .sig 並另外 commit 一次。"""
+    from . import signing
+    files = head_files(git, root)
+    manifest, sig = signing.sign_files(files, rel.get("version", "0"), secret)
+    with open(os.path.join(root, signing.MANIFEST), "wb") as f:
+        f.write(manifest)
+    with open(os.path.join(root, signing.SIGNATURE), "w", encoding="ascii", newline="\n") as f:
+        f.write(sig)
+    run("add", signing.MANIFEST, signing.SIGNATURE)
+    body = "\n".join("- " + n for n in rel.get("notes", []))
+    run("commit", "-m", f"v{rel.get('version', '0')} 簽章", *(("-m", body) if body else ()),
+        extra=_identity(run, rel), quiet=True)
+    if not is_signed(git, root):
+        raise RuntimeError("簽章後自我驗證失敗（不應該發生），沒有上傳")
+    log(f"✓ 已簽章：{len(files) - 2 if signing.MANIFEST in files else len(files)} 個檔案")
+
+
+def pending_info(timeout=8, root=None):
+    """GitHub 上 pending 分支比 main 多了什麼：{ahead, version, notes, sha, checks}；沒有 pending 回傳 None。"""
+    root = root or TOOL_ROOT
+    rel = read_release(os.path.join(root, "release.json"))
+    repo, branch = rel.get("repo", ""), rel.get("branch", "main")
+    pend = rel.get("pending_branch", "pending")
+    if not repo:
+        return None
+    try:
+        cmp = json.loads(_get(f"https://api.github.com/repos/{repo}/compare/{branch}...{pend}", timeout))
+    except Exception:
+        return None
+    ahead = int(cmp.get("ahead_by", 0))
+    if ahead <= 0:
+        return {"ahead": 0}
+    info = {"ahead": ahead, "sha": (cmp.get("commits") or [{}])[-1].get("sha"),
+            "messages": [c.get("commit", {}).get("message", "").splitlines()[0] for c in cmp.get("commits", [])]}
+    try:
+        prel = json.loads(_get(manifest_url(repo, pend) + f"?t={int(time.time())}", timeout).decode("utf-8"))
+        info.update(version=prel.get("version"), notes=prel.get("notes", []))
+    except Exception:
+        pass
+    info["checks"] = ci_status(repo, info.get("sha"), timeout)
+    return info
+
+
+def ci_status(repo, sha, timeout=8):
+    """GitHub Actions 測試結果：'success' / 'failure' / 'pending' / None（沒有測試或讀不到）。"""
+    if not repo or not sha:
+        return None
+    try:
+        data = json.loads(_get(f"https://api.github.com/repos/{repo}/commits/{sha}/check-runs", timeout))
+    except Exception:
+        return None
+    runs = data.get("check_runs", [])
+    if not runs:
+        return None
+    if any(r.get("status") != "completed" for r in runs):
+        return "pending"
+    if all(r.get("conclusion") in ("success", "skipped", "neutral") for r in runs):
+        return "success"
+    return "failure"
+
+
+def receive(log=print, ask=input, root=None, test=True):
+    """收更新：把 Claude 推到 pending 分支的更新收下來 → 自我測試 → 簽章 → 發佈到 main。
+
+    · 不會動到你資料夾裡還沒發佈的修改（有的話會先停下來請你處理）
+    · 測試沒過就還原，main 不會變"""
+    root = root or TOOL_ROOT
+    if not os.path.isdir(os.path.join(root, ".git")):
+        log("這個資料夾不是用 GitHub Desktop 複製（Clone）下來的，沒辦法收更新。請照「發佈與更新.md」設定。")
+        return False
+    git = find_git()
+    if not git:
+        log("找不到 git。請安裝 GitHub Desktop（https://desktop.github.com）或 Git for Windows（https://git-scm.com）。")
+        return False
+    run = _git_runner(git, root, log)
+    rel = read_release(os.path.join(root, "release.json"))
+    branch, pend = rel.get("branch", "main"), rel.get("pending_branch", "pending")
+    log(f"工具資料夾：{root}")
+    log("讀取 GitHub 上的待發佈更新…")
+    if run("fetch", "origin", branch, check=False, quiet=True).returncode != 0:
+        log("連不上 GitHub（git fetch 失敗）。請確認網路，或先打開 GitHub Desktop 登入一次。")
+        return False
+    if run("fetch", "origin", pend, check=False, quiet=True).returncode != 0:
+        log(f"\nGitHub 上沒有 {pend} 分支，目前沒有待發佈的更新。")
+        return True
+    changes = [l for l in run("status", "--porcelain", "--untracked-files=no", quiet=True).stdout.splitlines()
+               if l.strip()]
+    if changes:
+        log("\n你的資料夾有還沒發佈的修改，為了不蓋掉它們，先停在這裡：")
+        for l in changes[:15]:
+            log("  " + l)
+        log("→ 要保留：先執行 publish.bat 發佈；不要了：在 GitHub Desktop 對那些檔案按右鍵「Discard changes」。")
+        return False
+    cur = run("rev-parse", "--abbrev-ref", "HEAD", quiet=True).stdout.strip()
+    if cur != branch:
+        run("checkout", branch, quiet=True)
+    if run("merge", "--ff-only", f"origin/{branch}", check=False, quiet=True).returncode != 0:
+        log(f"本機的 {branch} 和 GitHub 上的不一致（兩邊各有不同的修改）。請在 GitHub Desktop 按 Pull 處理後再試。")
+        return False
+    n = run("rev-list", "--count", f"HEAD..origin/{pend}", quiet=True).stdout.strip()
+    if n in ("", "0"):
+        log("\n✓ 沒有待發佈的更新（pending 已經都發佈了）。")
+        return True
+    try:
+        prel = json.loads(run("show", f"origin/{pend}:release.json", quiet=True).stdout)
+    except (ValueError, RuntimeError):
+        prel = {}
+    log(f"\n待發佈：v{prel.get('version', '?')}（目前 v{rel.get('version', '?')}），{n} 個修改")
+    for note in prel.get("notes", []):
+        log(f"  · {note}")
+    sha = run("rev-parse", f"origin/{pend}", quiet=True).stdout.strip()
+    ci = ci_status(rel.get("repo", ""), sha)
+    log({"success": "GitHub 測試（Windows、Mac）：✓ 通過", "failure": "GitHub 測試：✗ 沒有通過",
+         "pending": "GitHub 測試：還在跑"}.get(ci, "GitHub 測試：讀不到結果"))
+    if ci == "failure":
+        if (ask("\nGitHub 上的測試沒有通過，建議先不要發佈。仍要繼續請輸入 yes，直接 Enter = 取消：") or "").strip().lower() != "yes":
+            log("已取消。")
+            return False
+    elif (ask("\n收下並發佈？（直接 Enter = 是，輸入 n = 取消）：") or "").strip().lower() in ("n", "no"):
+        log("已取消。")
+        return False
+    old = run("rev-parse", "HEAD", quiet=True).stdout.strip()
+    if run("merge", "--ff-only", f"origin/{pend}", check=False, quiet=True).returncode != 0:
+        log(f"{pend} 不是接在目前的 {branch} 後面（可能 main 之後又有新的發佈）。請告訴 Claude「pending 需要重新整理」。")
+        return False
+    rel = read_release(os.path.join(root, "release.json"))
+
+    def undo(reason):
+        run("reset", "--hard", old, check=False, quiet=True)
+        log(f"\n{reason}，已還原，main 沒有改變、也沒有上傳。")
+
+    if test:
+        log("\n--- 自我測試（約 15–40 秒）---")
+        if not run_selftest(root, log):
+            undo("自我測試沒有通過")
+            log("把上面 ✗ 的錯誤訊息貼給 Claude 就可以修正。")
+            return False
+    try:
+        secret = ensure_signing_key(root, log)
+        from . import signing
+        if run("status", "--porcelain", "--", signing.PUBKEY_REL, quiet=True).stdout.strip():
+            run("add", signing.PUBKEY_REL)
+            run("commit", "-m", "加入發佈公鑰", extra=_identity(run, rel), quiet=True)
+        sign_head(run, git, root, rel, secret, log)
+    except RuntimeError as e:
+        undo(f"簽章失敗：{e}")
+        return False
+    try:
+        run("push", "origin", branch)
+    except RuntimeError as e:
+        log(f"\n上傳到 GitHub 失敗：{e}")
+        log("→ 已經收好、測試、簽章完成。打開 GitHub Desktop 按「Push origin」就完成。")
+        return False
+    log(f"\n✓ 已發佈 v{rel.get('version')} 到 GitHub（{rel.get('repo')}），同事幾分鐘內會收到更新提示。")
+    return True
 
 
 def publish(log=print, ask=input, root=None, test=True):
@@ -414,15 +668,7 @@ def publish(log=print, ask=input, root=None, test=True):
         log("找不到 git。請安裝 GitHub Desktop（https://desktop.github.com）或 Git for Windows（https://git-scm.com）。")
         return False
 
-    def run(*args, check=True, quiet=False, extra=()):
-        out = subprocess.run([git, *extra, *args], cwd=root, capture_output=True, text=True,
-                             encoding="utf-8", errors="replace")
-        if not quiet and out.stdout.strip():
-            log(out.stdout.strip())
-        if check and out.returncode != 0:
-            raise RuntimeError((out.stderr or out.stdout).strip() or f"git {args[0]} 失敗")
-        return out
-
+    run = _git_runner(git, root, log)
     rel = read_release(os.path.join(root, "release.json"))
     branch = rel.get("branch", "main")
     log(f"工具資料夾：{root}")
@@ -442,6 +688,8 @@ def publish(log=print, ask=input, root=None, test=True):
             ahead = run("rev-list", "--count", f"origin/{branch}..HEAD", check=False, quiet=True).stdout.strip()
             if ahead and ahead != "0":
                 log("有已經存好但還沒上傳的版本，直接上傳。")
+            elif not is_signed(git, root):
+                log("GitHub 上的版本還沒有簽章，補簽章後上傳。")
             else:
                 log(f"\nGitHub 上已經是 v{remote}，而且沒有新的變更，不需要發佈。")
                 return True
@@ -471,10 +719,13 @@ def publish(log=print, ask=input, root=None, test=True):
             run("rm", "--cached", "--quiet", f, check=False)
             log(f"停止上傳 {f}（檔案仍留在你的電腦）")
 
-    ident = ()
-    if run("config", "user.email", check=False, quiet=True).returncode != 0:
-        owner = (rel.get("repo") or "user/x").split("/")[0]
-        ident = ("-c", f"user.name={owner}", "-c", f"user.email={owner}@users.noreply.github.com")
+    try:
+        secret = ensure_signing_key(root, log)
+    except RuntimeError as e:
+        log(f"\n{e}")
+        log("沒有上傳。")
+        return False
+    ident = _identity(run, rel)
     run("add", "-A")
     msg = f"v{rel['version']}"
     body = "\n".join("- " + n for n in rel.get("notes", []))
@@ -482,6 +733,8 @@ def publish(log=print, ask=input, root=None, test=True):
     if out.returncode != 0 and "nothing to commit" not in (out.stdout + out.stderr):
         raise RuntimeError(out.stderr.strip() or "commit 失敗")
     log(f"\n已存好：{msg}")
+    if not is_signed(git, root):
+        sign_head(run, git, root, rel, secret, log)
     try:
         run("push", "origin", branch)
     except RuntimeError as e:
