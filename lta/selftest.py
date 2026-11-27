@@ -380,6 +380,7 @@ def main(gui=True, log=print):
     tmp = tempfile.mkdtemp(prefix="lta_selftest_")
     old_local = os.environ.get("LOCALAPPDATA")
     os.environ["LOCALAPPDATA"] = os.path.join(tmp, "appdata")        # 不動到你自己的設定
+    os.environ["LTA_SELFTEST"] = "1"            # 軟體不檢查更新、不跳出詢問視窗（避免測試卡住）
     rep = Report(log)
     t0 = time.time()
     try:
@@ -489,6 +490,7 @@ def main(gui=True, log=print):
         if gui:
             run_gui(db_path, runs, rep, out=tmp)
     finally:
+        os.environ.pop("LTA_SELFTEST", None)
         if old_local is None:
             os.environ.pop("LOCALAPPDATA", None)
         else:

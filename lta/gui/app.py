@@ -2621,8 +2621,8 @@ class App:
         return win
 
     def check_update(self, manual=False):
-        """背景檢查 GitHub 上有沒有新版本。"""
-        if self._dead:
+        """背景檢查 GitHub 上有沒有新版本。自我測試時不檢查（不能跳出要人回答的視窗）。"""
+        if self._dead or (os.environ.get("LTA_SELFTEST") and not manual):
             return
 
         def work():
@@ -2643,7 +2643,7 @@ class App:
     def _on_pending(self, info, manual=False):
         """開發資料夾：GitHub 的 pending 分支有新的更新 → 問要不要收更新（測試 → 簽章 → 發佈）。"""
         self._pending_info = info
-        if self._dead or not info or not info.get("ahead"):
+        if self._dead or not info or not info.get("ahead") or os.environ.get("LTA_SELFTEST"):
             return
         ver = info.get("version") or "?"
         self.status(f"有新版本待發佈 v{ver}：⚙ 設定 → 更新 →「📥 收更新」，或雙擊 收更新.bat", "warn")
