@@ -581,6 +581,10 @@ def receive(log=print, ask=input, root=None, test=True):
         return True
     changes = [l for l in run("status", "--porcelain", "--untracked-files=no", quiet=True).stdout.splitlines()
                if l.strip()]
+    cache = [l[3:].strip().strip('"') for l in changes if "__pycache__" in l or l.rstrip().endswith(".pyc")]
+    if cache:                                       # Python 自動產生的編譯檔：直接還原，不算你的修改
+        run("checkout", "--", *cache, check=False, quiet=True)
+        changes = [l for l in changes if "__pycache__" not in l and not l.rstrip().endswith(".pyc")]
     if changes:
         log("\n你的資料夾有還沒發佈的修改，為了不蓋掉它們，先停在這裡：")
         for l in changes[:15]:
